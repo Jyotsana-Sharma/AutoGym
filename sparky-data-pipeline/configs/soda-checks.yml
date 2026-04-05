@@ -1,0 +1,39 @@
+# Soda checks for SparkyFitness data pipeline
+# Runs automated data quality validation on enriched recipes and training splits
+
+checks for enriched_recipes:
+  # Schema checks
+  - row_count > 50000
+  - missing_count(recipe_id) = 0
+  - missing_count(calories) = 0
+  - missing_count(cuisine) = 0
+  - duplicate_count(recipe_id) = 0
+
+  # Value range checks — realistic for food data
+  - min(calories) >= 0
+  - max(calories) < 10000
+  - min(minutes) > 0
+  - max(minutes) < 10000
+  - min(n_ingredients) >= 1
+  - min(n_reviews) >= 3
+
+  # Distribution checks
+  - avg(calories) between 200 and 800
+  - avg(protein_g) between 5 and 100
+
+checks for train:
+  - row_count > 100000
+  - missing_count(user_id) = 0
+  - missing_count(recipe_id) = 0
+  - missing_count(label) = 0
+
+  # Label balance — should not be extremely skewed
+  - avg(label) between 0.1 and 0.9
+
+checks for val:
+  - row_count > 1000
+  - missing_count(label) = 0
+
+checks for test:
+  - row_count > 1000
+  - missing_count(label) = 0
