@@ -1,15 +1,6 @@
 """
 ingest_to_object_store.py  —  Q2.3: External Data Ingestion
-=============================================================
-Reproducible pipeline:
-  1. Reads RAW_recipes.csv + RAW_interactions.csv from local dir
-  2. Validates schema and data integrity
-  3. Computes SHA-256 hashes for versioning
-  4. Uploads to Chameleon Object Storage (OpenStack Swift)
-  5. If data < 5 GB: synthetic expansion (2x) via Gaussian noise
-
-Runs non-interactively:
-  docker compose --profile ingest run --rm ingest
+Runs non-interactively: docker compose --profile ingest run --rm ingest
 """
 import argparse, ast, hashlib, json, os, sys
 from datetime import datetime
@@ -23,7 +14,7 @@ except ImportError:
     HAS_SWIFT = False
     print("warn: python-swiftclient not installed — dry-run mode")
 
-RAW_BUCKET = "sparky-raw-data"
+RAW_BUCKET = "proj04-sparky-raw-data"
 NOISE_STD = 0.05; EXPAND_FACTOR = 2; MAX_SIZE_GB = 5
 EXPECTED_RECIPE_COLS = ["name","id","minutes","tags","nutrition","n_steps","n_ingredients","ingredients","description"]
 EXPECTED_INTER_COLS  = ["user_id","recipe_id","date","rating","review"]
@@ -35,30 +26,25 @@ def sha256_file(path):
     return h.hexdigest()
 
 def get_swift_conn():
-    """Connect to Chameleon Object Storage using OpenStack Swift."""
+    """Connect to Chameleon Object Storage using application credentials."""
     return swiftclient.Connection(
         authurl=os.environ.get("OS_AUTH_URL", "https://chi.tacc.chameleoncloud.org:5000/v3"),
-        user=os.environ.get("OS_USERNAME", ""),
-        key=os.environ.get("OS_PASSWORD", ""),
+        auth_version="3",
         os_options={
-            "project_name": os.environ.get("OS_PROJECT_NAME", ""),
-            "project_domain_name": os.environ.get("OS_PROJECT_DOMAIN_NAME", "default"),
-            "user_domain_name": os.environ.get("OS_USER_DOMAIN_NAME", "default"),
+            "auth_type": "v3applicationcredential",
+            "application_credential_id": os.environ.get("OS_APPLICATION_CREDENTIAL_ID", ""),
+            "application_credential_secret": os.environ.get("OS_APPLICATION_CREDENTIAL_SECRET", ""),
             "region_name": os.environ.get("OS_REGION_NAME", "CHI@TACC"),
         },
-        auth_version="3",
     )
 
 def ensure_container(conn, name):
-    """Create Swift container if it doesn't exist."""
-    try:
-        conn.head_container(name)
+    try: conn.head_container(name)
     except swiftclient.ClientException:
         conn.put_container(name, headers={"X-Container-Read": ".r:*,.rlistings"})
         print(f"  Created container {name} (public read)")
 
 def upload_file(conn, container, object_name, filepath, metadata=None):
-    """Upload a file to Chameleon Swift object storage."""
     headers = {}
     if metadata:
         for k, v in metadata.items():
@@ -69,7 +55,6 @@ def upload_file(conn, container, object_name, filepath, metadata=None):
     print(f"  Uploaded {object_name} ({size_mb:.1f} MB)")
 
 def upload_bytes(conn, container, object_name, data, metadata=None):
-    """Upload raw bytes to Chameleon Swift object storage."""
     headers = {}
     if metadata:
         for k, v in metadata.items():
@@ -153,21 +138,15 @@ def main():
 
     if args.dry_run or not HAS_SWIFT:
         print("\n-- DRY RUN — would upload to container:", RAW_BUCKET)
-        print(f"  RAW_recipes.csv       (metadata: {meta_r})")
-        print(f"  RAW_interactions.csv  (metadata: {meta_i})")
-        if expanded_path: print(f"  RAW_recipes_expanded.csv (synthetic)")
     else:
         print("\n-- Uploading to Chameleon Object Storage (Swift) --")
         conn = get_swift_conn()
         ensure_container(conn, RAW_BUCKET)
-
         upload_file(conn, RAW_BUCKET, "RAW_recipes.csv", rp, meta_r)
         upload_file(conn, RAW_BUCKET, "RAW_interactions.csv", ip, meta_i)
-
         if expanded_path and expanded_path.exists():
             upload_file(conn, RAW_BUCKET, "RAW_recipes_expanded.csv",
                         expanded_path, {**meta_r, "synthetic": "true"})
-
         manifest = {"pipeline":"ingest_to_object_store.py","timestamp":ts,
                      "files":{"RAW_recipes.csv":{"sha256":rh,"rows":len(df_r)},
                               "RAW_interactions.csv":{"sha256":ih,"rows":len(df_i)}},
