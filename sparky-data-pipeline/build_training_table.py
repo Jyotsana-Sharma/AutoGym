@@ -36,7 +36,7 @@ warnings.filterwarnings("ignore")
 # ─────────────────────────────────────────────────────────────
 
 RAW_RECIPES_PATH      = "RAW_recipes.csv"
-RAW_INTERACTIONS_PATH = "interactions.csv"
+RAW_INTERACTIONS_PATH = "RAW_interactions.csv"
 ENRICHED_RECIPES_PATH = "enriched_recipes.csv"
 TRAINING_TABLE_PATH   = "training_table.csv"
 
