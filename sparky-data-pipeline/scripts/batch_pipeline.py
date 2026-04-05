@@ -1,10 +1,9 @@
 """
 batch_pipeline.py  —  Q2.6: Batch Training Data Pipeline
 Compiles versioned training/evaluation datasets from production data.
-Uses Chameleon Object Storage (OpenStack Swift) for versioned artifacts.
-Runs non-interactively:  docker compose --profile batch run --rm batch-pipeline
+Runs non-interactively: docker compose --profile batch run --rm batch-pipeline
 """
-import argparse, hashlib, importlib.util, json, os, shutil, sys, time
+import argparse, hashlib, json, os, shutil, subprocess, sys, time
 from datetime import datetime
 from pathlib import Path
 import numpy as np, pandas as pd
@@ -18,7 +17,9 @@ except ImportError:
 try: import psycopg2; HAS_PG=True
 except ImportError: HAS_PG=False
 
-PIPELINE_VERSION="1.0.0"; RAW_BUCKET="sparky-raw-data"; TRAINING_BUCKET="sparky-training-data"
+PIPELINE_VERSION="1.0.0"
+RAW_BUCKET="proj04-sparky-raw-data"
+TRAINING_BUCKET="proj04-sparky-training-data"
 
 def sha256_file(p):
     h=hashlib.sha256()
@@ -29,18 +30,16 @@ def sha256_file(p):
 def sha256_str(s): return hashlib.sha256(s.encode()).hexdigest()
 
 def get_swift_conn():
-    """Connect to Chameleon Object Storage using OpenStack Swift."""
+    """Connect to Chameleon Object Storage using application credentials."""
     return swiftclient.Connection(
         authurl=os.environ.get("OS_AUTH_URL", "https://chi.tacc.chameleoncloud.org:5000/v3"),
-        user=os.environ.get("OS_USERNAME", ""),
-        key=os.environ.get("OS_PASSWORD", ""),
+        auth_version="3",
         os_options={
-            "project_name": os.environ.get("OS_PROJECT_NAME", ""),
-            "project_domain_name": os.environ.get("OS_PROJECT_DOMAIN_NAME", "default"),
-            "user_domain_name": os.environ.get("OS_USER_DOMAIN_NAME", "default"),
+            "auth_type": "v3applicationcredential",
+            "application_credential_id": os.environ.get("OS_APPLICATION_CREDENTIAL_ID", ""),
+            "application_credential_secret": os.environ.get("OS_APPLICATION_CREDENTIAL_SECRET", ""),
             "region_name": os.environ.get("OS_REGION_NAME", "CHI@TACC"),
         },
-        auth_version="3",
     )
 
 def ensure_container(conn, name):
@@ -138,21 +137,28 @@ def main():
     else: print("\n-- Step 2: No DB URL — Kaggle data only --")
 
     print("\n-- Step 3: Running enrichment pipeline --")
+
+    # Find build_training_table.py
     btm_path=None
-    for candidate in [raw/"build_training_table.py",Path("build_training_table.py"),Path("/app/build_training_table.py")]:
+    for candidate in [raw/"build_training_table.py", Path("build_training_table.py"), Path("/app/build_training_table.py")]:
         if candidate.exists(): btm_path=candidate; break
 
     if btm_path:
         print(f"  Using {btm_path}")
-        spec=importlib.util.spec_from_file_location("btm",btm_path)
-        btm=importlib.util.module_from_spec(spec)
-        btm.RAW_RECIPES_PATH=str(rp); btm.RAW_INTERACTIONS_PATH=str(ip)
-        btm.ENRICHED_RECIPES_PATH=str(out/"enriched_recipes.csv")
-        btm.TRAINING_TABLE_PATH=str(out/"training_table.csv")
-        spec.loader.exec_module(btm); btm.main()
-        for sp in ["train.csv","val.csv","test.csv"]:
-            for src in [Path(sp),raw/sp]:
-                if src.exists(): shutil.move(str(src),str(out/sp)); break
+        # Run as subprocess in the data directory (avoids all import/path issues)
+        result = subprocess.run(
+            ["python", str(btm_path)],
+            cwd=str(raw),
+            capture_output=False
+        )
+        if result.returncode != 0:
+            print("  ERROR: build_training_table.py failed")
+            sys.exit(1)
+        # Copy output files from data dir to output dir
+        for sp in ["enriched_recipes.csv","training_table.csv","train.csv","val.csv","test.csv"]:
+            src = raw / sp
+            if src.exists():
+                shutil.copy(str(src), str(out/sp))
     else:
         print("  build_training_table.py not found, running inline fallback")
         df_r=df_r.rename(columns={"id":"recipe_id"})

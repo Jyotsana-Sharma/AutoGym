@@ -1,5 +1,6 @@
 sparky-data-pipeline/data/
 .env
+sparky-data-pipeline/.CHI-251409-openrc.sh
 .CHI-251409-openrc.sh
 .data
 .output
