@@ -1,6 +1,5 @@
 services:
 
-  # ── PostgreSQL ────────────────────────────────────────────
   postgres:
     image: postgres:15-alpine
     container_name: sparky-postgres
@@ -20,7 +19,6 @@ services:
       timeout: 3s
       retries: 10
 
-  # ── Q2.3: External Data Ingestion ────────────────────────
   ingest:
     build: .
     container_name: sparky-ingest
@@ -31,20 +29,17 @@ services:
     volumes:
       - ./data:/data
       - ./output:/output
+      - ./scripts:/app/scripts:ro
     environment:
-      OS_AUTH_URL: ${OS_AUTH_URL:-https://chi.tacc.chameleoncloud.org:5000/v3}
-      OS_USERNAME: ${OS_USERNAME:-}
-      OS_PASSWORD: ${OS_PASSWORD:-}
-      OS_PROJECT_NAME: ${OS_PROJECT_NAME:-}
-      OS_PROJECT_DOMAIN_NAME: ${OS_PROJECT_DOMAIN_NAME:-default}
-      OS_USER_DOMAIN_NAME: ${OS_USER_DOMAIN_NAME:-default}
+      OS_AUTH_URL: ${OS_AUTH_URL}
+      OS_APPLICATION_CREDENTIAL_ID: ${OS_APPLICATION_CREDENTIAL_ID}
+      OS_APPLICATION_CREDENTIAL_SECRET: ${OS_APPLICATION_CREDENTIAL_SECRET}
       OS_REGION_NAME: ${OS_REGION_NAME:-CHI@TACC}
     depends_on:
       postgres:
         condition: service_healthy
     profiles: ["ingest"]
 
-  # ── Q2.4: Data Generator ─────────────────────────────────
   data-generator:
     build: .
     container_name: sparky-data-generator
@@ -61,12 +56,12 @@ services:
     volumes:
       - ./data:/data
       - ./output:/output
+      - ./scripts:/app/scripts:ro
     depends_on:
       postgres:
         condition: service_healthy
     profiles: ["generate"]
 
-  # ── Q2.5: Online Feature Computation Demo ────────────────
   online-feature-demo:
     build: .
     container_name: sparky-online-features
@@ -77,12 +72,12 @@ services:
         --demo
     volumes:
       - ./data:/data
+      - ./scripts:/app/scripts:ro
     depends_on:
       postgres:
         condition: service_healthy
     profiles: ["online-demo"]
 
-  # ── Q2.6: Batch Training Data Pipeline ──────────────────
   batch-pipeline:
     build: .
     container_name: sparky-batch-pipeline
@@ -95,13 +90,11 @@ services:
     volumes:
       - ./data:/data
       - ./output:/output
+      - ./scripts:/app/scripts:ro
     environment:
-      OS_AUTH_URL: ${OS_AUTH_URL:-https://chi.tacc.chameleoncloud.org:5000/v3}
-      OS_USERNAME: ${OS_USERNAME:-}
-      OS_PASSWORD: ${OS_PASSWORD:-}
-      OS_PROJECT_NAME: ${OS_PROJECT_NAME:-}
-      OS_PROJECT_DOMAIN_NAME: ${OS_PROJECT_DOMAIN_NAME:-default}
-      OS_USER_DOMAIN_NAME: ${OS_USER_DOMAIN_NAME:-default}
+      OS_AUTH_URL: ${OS_AUTH_URL}
+      OS_APPLICATION_CREDENTIAL_ID: ${OS_APPLICATION_CREDENTIAL_ID}
+      OS_APPLICATION_CREDENTIAL_SECRET: ${OS_APPLICATION_CREDENTIAL_SECRET}
       OS_REGION_NAME: ${OS_REGION_NAME:-CHI@TACC}
       GIT_COMMIT: ${GIT_COMMIT:-unknown}
     depends_on:
