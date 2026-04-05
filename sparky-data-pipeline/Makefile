@@ -3,12 +3,12 @@
 setup:
 	mkdir -p data output
 	docker compose up -d postgres
-	@echo "Waiting for services..."; sleep 15
+	@echo "Waiting for Postgres..."; sleep 15
 	docker compose exec postgres pg_isready -U sparky
 	@echo "Postgres running. Place CSVs in data/"
 
 build:
-	docker compose build
+	docker compose build --no-cache
 
 enrich:
 	cp build_training_table.py data/
