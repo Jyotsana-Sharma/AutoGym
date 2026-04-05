@@ -1,8 +1,7 @@
 """
 online_feature_pipeline.py  —  Q2.5: Online Feature Computation
-Real-time feature computation path for inference.
-Runs non-interactively:  docker compose --profile online-demo run --rm online-feature-demo
-Integrate-able:  from online_feature_pipeline import OnlineFeaturePipeline
+Runs non-interactively: docker compose --profile online-demo run --rm online-feature-demo
+Integrate-able: from online_feature_pipeline import OnlineFeaturePipeline
 """
 import argparse, os, time
 from typing import Dict, Optional, Tuple
@@ -135,4 +134,5 @@ def main():
     if args.demo: run_demo(args.recipes_path,args.user_features_csv,args.db_url)
     else: print("Use --demo for end-to-end demonstration.")
 
-if __name__=="__main__": main()
+if __name__=="__main__": 
+    main()
