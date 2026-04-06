@@ -1,0 +1,27 @@
+services:
+  mlflow:
+    build:
+      context: .
+      dockerfile: Dockerfile.mlflow
+    container_name: autogym-mlflow
+    ports:
+      - "5000:5000"
+    environment:
+      MLFLOW_BACKEND_STORE_URI: sqlite:////app/local/mlflow/mlflow.db
+      MLFLOW_ARTIFACT_ROOT: /app/local/mlartifacts
+    volumes:
+      - ./:/app
+    working_dir: /app
+    command: ["sh", "/app/scripts/start_mlflow.sh"]
+
+  train:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    volumes:
+      - ./:/app
+    working_dir: /app
+    depends_on:
+      - mlflow

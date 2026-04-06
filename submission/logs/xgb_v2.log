@@ -1,0 +1,10 @@
+🏃 View run xgb_ranker_v2 at: http://mlflow:5000/#/experiments/1/runs/0fcdbae59c294249b3435de9fb385918
+🧪 View experiment at: http://mlflow:5000/#/experiments/1
+{
+  "run_name": "xgb_ranker_v2",
+  "candidate_name": "xgb_ranker",
+  "metrics": {
+    "ndcg_at_10": 0.8148148148148148,
+    "wall_time_seconds": 20.2441
+  }
+}

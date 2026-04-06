@@ -1,0 +1,19 @@
+.DS_Store
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+.venv/
+venv/
+
+# Local training and MLflow state
+local/
+mlruns/
+.pytest_cache/
+
+# Local datasets staged outside Git
+data/
+
+# Environment files and editor noise
+.env
+.env.*
