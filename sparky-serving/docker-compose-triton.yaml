@@ -1,0 +1,20 @@
+services:
+  triton_server:
+    build:
+      context: .
+      dockerfile: Dockerfile.triton
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+      - "8002:8002"
+    restart: unless-stopped
+
+  jupyter:
+    image: quay.io/jupyter/minimal-notebook:latest
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./scripts:/home/jovyan/scripts
+      - ./samples:/home/jovyan/samples
+      - ./results:/home/jovyan/results
+    restart: unless-stopped

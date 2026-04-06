@@ -1,0 +1,22 @@
+services:
+  fastapi_server:
+    build:
+      context: .
+      dockerfile: Dockerfile.optimized
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/models:ro
+    environment:
+      - MODEL_PATH=/models/xgboost_ranker.json
+    restart: unless-stopped
+
+  jupyter:
+    image: quay.io/jupyter/minimal-notebook:latest
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./scripts:/home/jovyan/scripts
+      - ./samples:/home/jovyan/samples
+      - ./results:/home/jovyan/results
+    restart: unless-stopped
