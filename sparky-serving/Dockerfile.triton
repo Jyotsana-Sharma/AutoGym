@@ -1,4 +1,4 @@
-FROM nvcr.io/nvidia/tritonserver:24.10-py3
+FROM nvcr.io/nvidia/tritonserver:24.10-py3-min
 
 COPY triton/model_repository/ /models/
 
