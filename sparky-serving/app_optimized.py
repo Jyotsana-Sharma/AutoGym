@@ -2,9 +2,10 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import xgboost as xgb
 import numpy as np
+import pandas as pd
 import os
 import logging
-from typing import Optional
+from datetime import datetime, timezone
 from functools import lru_cache
 from prometheus_fastapi_instrumentator import Instrumentator
 
@@ -12,25 +13,24 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="SparkyFitness Meal Recommendation API (Optimized)",
+    title="SparkyFitness Meal Ranker API (Optimized)",
     description="XGBoost ranking model with infrastructure optimizations",
     version="1.0.0",
 )
 
 # ---------------------------------------------------------------------------
-# Feature schema
+# Feature schema — matches shared contract (contracts/recipe_ranker_input.sample.json)
 # ---------------------------------------------------------------------------
 
-RECIPE_NUMERIC_FEATURES = [
+FEATURE_COLUMNS = [
     "minutes", "n_ingredients", "n_steps", "avg_rating", "n_reviews",
+    "cuisine",
     "calories", "total_fat", "sugar", "sodium", "protein",
-    "saturated_fat", "carbohydrate", "total_fat_g", "sugar_g", "sodium_g",
-    "protein_g", "saturated_fat_g", "carbohydrate_g",
+    "saturated_fat", "carbohydrate",
+    "total_fat_g", "sugar_g", "sodium_g", "protein_g",
+    "saturated_fat_g", "carbohydrate_g",
     "has_egg", "has_fish", "has_milk", "has_nuts", "has_peanut",
     "has_sesame", "has_shellfish", "has_soy", "has_wheat",
-]
-
-USER_FEATURES = [
     "daily_calorie_target", "protein_target_g", "carbs_target_g", "fat_target_g",
     "user_vegetarian", "user_vegan", "user_gluten_free", "user_dairy_free",
     "user_low_sodium", "user_low_fat",
@@ -38,48 +38,31 @@ USER_FEATURES = [
     "history_pc5", "history_pc6",
 ]
 
-CUISINE_CATEGORIES = [
-    "african", "american", "asian", "chinese", "european", "french",
-    "german", "greek", "indian", "latin_american", "mexican",
-    "middle_eastern", "pacific", "scandinavian", "spanish", "unknown",
-]
-
-N_FEATURES = 59
-N_RECIPE_FEATURES = len(RECIPE_NUMERIC_FEATURES)  # 27
-N_USER_FEATURES = len(USER_FEATURES)  # 16
-N_CUISINE_FEATURES = len(CUISINE_CATEGORIES)  # 16
-
-# Pre-compute cuisine lookup for O(1) encoding
-_CUISINE_INDEX = {c: i for i, c in enumerate(CUISINE_CATEGORIES)}
+N_FEATURES = len(FEATURE_COLUMNS)  # 44
 
 # ---------------------------------------------------------------------------
-# Request / response models
+# Request / response models — matches shared contract exactly
 # ---------------------------------------------------------------------------
 
 class PredictRequest(BaseModel):
-    user_id: Optional[int] = None
-    user_features: dict
-    candidate_recipes: list[dict]
+    request_id: str
+    model_name: str = "xgb_ranker"
+    instances: list[dict]
 
 
-class RankedRecipe(BaseModel):
-    rank: int
+class Prediction(BaseModel):
+    user_id: int
     recipe_id: int
-    name: str
-    relevance_score: float
-    calories: float
-    protein_g: float
-    carbohydrate_g: float
-    total_fat_g: float
-    minutes: float
-    cuisine: str
+    score: float
+    rank: int
 
 
 class PredictResponse(BaseModel):
-    user_id: Optional[int] = None
-    ranked_recipes: list[RankedRecipe]
+    request_id: str
+    model_name: str
     model_version: str
-    num_candidates_scored: int
+    generated_at: str
+    predictions: list[Prediction]
 
 # ---------------------------------------------------------------------------
 # Model loading with LRU cache
@@ -90,7 +73,6 @@ MODEL_PATH = os.environ.get("MODEL_PATH", "/models/xgboost_ranker.json")
 
 @lru_cache(maxsize=1)
 def _load_model(path: str) -> xgb.Booster:
-    """Load model with caching so reloads are free."""
     logger.info("Loading XGBoost model from %s", path)
     booster = xgb.Booster()
     booster.load_model(path)
@@ -98,60 +80,39 @@ def _load_model(path: str) -> xgb.Booster:
     return booster
 
 
-# Pre-load model at module level for fast first request
 model = _load_model(MODEL_PATH)
 
-# Pre-allocate a reusable buffer for small batch sizes (common case)
+# Pre-allocate reusable buffer for small batches
 _MAX_PREALLOC = 128
 _preallocated_buffer = np.zeros((_MAX_PREALLOC, N_FEATURES), dtype=np.float32)
 
 # ---------------------------------------------------------------------------
-# Feature assembly (optimized)
+# Feature assembly — optimized version matching training code
 # ---------------------------------------------------------------------------
 
-def _encode_cuisine_fast(cuisine: str) -> int:
-    """Return the index for one-hot encoding, defaulting to 'unknown'."""
-    return _CUISINE_INDEX.get(cuisine.lower().strip(), _CUISINE_INDEX["unknown"])
+def assemble_features(instances: list[dict]) -> tuple[np.ndarray, list[int], list[int]]:
+    """Build feature matrix with pre-allocation optimization."""
+    df = pd.DataFrame(instances)
+    user_ids = df["user_id"].astype(int).tolist()
+    recipe_ids = df["recipe_id"].astype(int).tolist()
 
+    for col in FEATURE_COLUMNS:
+        if col not in df.columns:
+            df[col] = 0.0
+        if df[col].dtype == object or pd.api.types.is_string_dtype(df[col]):
+            categories = sorted(df[col].fillna("unknown").astype(str).unique())
+            cat_map = {v: i for i, v in enumerate(categories)}
+            df[col] = df[col].fillna("unknown").astype(str).map(cat_map).fillna(-1).astype(float)
+        else:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
 
-def assemble_features(
-    user_features: dict, candidate_recipes: list[dict]
-) -> np.ndarray:
-    """Build a (n_candidates, 59) feature matrix with pre-allocation."""
-    n = len(candidate_recipes)
-
-    # Reuse pre-allocated buffer when possible to avoid allocation overhead
+    n = len(df)
     if n <= _MAX_PREALLOC:
         features = _preallocated_buffer[:n]
-        features[:] = 0.0  # Reset to zero
-    else:
-        features = np.zeros((n, N_FEATURES), dtype=np.float32)
+        features[:] = df[FEATURE_COLUMNS].values.astype(np.float32)
+        return features.copy(), user_ids, recipe_ids
 
-    # Pre-extract user feature values once (shared across all rows)
-    user_vals = np.array(
-        [float(user_features.get(f, 0.0)) for f in USER_FEATURES],
-        dtype=np.float32,
-    )
-    user_start = N_RECIPE_FEATURES
-    user_end = user_start + N_USER_FEATURES
-    cuisine_start = user_end
-
-    # Broadcast user features across all rows at once
-    features[:, user_start:user_end] = user_vals
-
-    for i, recipe in enumerate(candidate_recipes):
-        # Recipe numeric features
-        for j, f in enumerate(RECIPE_NUMERIC_FEATURES):
-            features[i, j] = float(recipe.get(f, 0.0))
-
-        # Cuisine one-hot (single index lookup)
-        cuisine_idx = _encode_cuisine_fast(recipe.get("cuisine", "unknown"))
-        features[i, cuisine_start + cuisine_idx] = 1.0
-
-    # Return a copy if using pre-allocated buffer (DMatrix may hold reference)
-    if n <= _MAX_PREALLOC:
-        return features.copy()
-    return features
+    return df[FEATURE_COLUMNS].values.astype(np.float32), user_ids, recipe_ids
 
 # ---------------------------------------------------------------------------
 # Endpoints
@@ -159,50 +120,39 @@ def assemble_features(
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "model": "xgboost_ranker", "backend": "xgboost_optimized"}
+    return {"status": "healthy", "model": "xgb_ranker", "backend": "xgboost_optimized"}
 
 
 @app.post("/predict", response_model=PredictResponse)
 def predict(request: PredictRequest):
     try:
-        candidates = request.candidate_recipes
-        if not candidates:
-            raise HTTPException(status_code=400, detail="candidate_recipes must not be empty")
+        if not request.instances:
+            raise HTTPException(status_code=400, detail="instances must not be empty")
 
-        # Assemble feature matrix
-        feature_matrix = assemble_features(request.user_features, candidates)
+        feature_matrix, user_ids, recipe_ids = assemble_features(request.instances)
+
         dmatrix = xgb.DMatrix(feature_matrix)
-        dmatrix.set_group([len(candidates)])
+        dmatrix.set_group([len(request.instances)])
 
-        # Score
         scores = model.predict(dmatrix)
-
-        # Use numpy argsort for faster ranking (descending)
         sorted_indices = np.argsort(scores)[::-1]
 
-        ranked_recipes = []
-        for rank, idx in enumerate(sorted_indices, start=1):
-            recipe = candidates[int(idx)]
-            ranked_recipes.append(
-                RankedRecipe(
-                    rank=rank,
-                    recipe_id=recipe["recipe_id"],
-                    name=recipe.get("name", ""),
-                    relevance_score=round(float(scores[idx]), 3),
-                    calories=float(recipe.get("calories", 0.0)),
-                    protein_g=float(recipe.get("protein_g", 0.0)),
-                    carbohydrate_g=float(recipe.get("carbohydrate_g", 0.0)),
-                    total_fat_g=float(recipe.get("total_fat_g", 0.0)),
-                    minutes=float(recipe.get("minutes", 0.0)),
-                    cuisine=recipe.get("cuisine", "unknown"),
-                )
+        predictions = [
+            Prediction(
+                user_id=user_ids[int(idx)],
+                recipe_id=recipe_ids[int(idx)],
+                score=round(float(scores[idx]), 4),
+                rank=rank,
             )
+            for rank, idx in enumerate(sorted_indices, start=1)
+        ]
 
         return PredictResponse(
-            user_id=request.user_id,
-            ranked_recipes=ranked_recipes,
-            model_version="xgboost_ranker_v1_optimized",
-            num_candidates_scored=len(candidates),
+            request_id=request.request_id,
+            model_name=request.model_name,
+            model_version="v1_optimized",
+            generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            predictions=predictions,
         )
 
     except HTTPException:
@@ -212,5 +162,4 @@ def predict(request: PredictRequest):
         raise HTTPException(status_code=500, detail=f"Inference error: {str(e)}")
 
 
-# Prometheus metrics
 Instrumentator().instrument(app).expose(app)

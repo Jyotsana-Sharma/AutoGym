@@ -1,3 +1,4 @@
+name: sparky-onnx
 services:
   fastapi_server:
     build:

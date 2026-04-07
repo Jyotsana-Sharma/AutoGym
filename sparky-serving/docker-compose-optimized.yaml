@@ -1,3 +1,4 @@
+name: sparky-optimized
 services:
   fastapi_server:
     build:

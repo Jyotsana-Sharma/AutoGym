@@ -2,34 +2,34 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import onnxruntime as ort
 import numpy as np
+import pandas as pd
 import os
 import logging
-from typing import Optional
+from datetime import datetime, timezone
 from prometheus_fastapi_instrumentator import Instrumentator
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="SparkyFitness Meal Recommendation API (ONNX)",
-    description="XGBoost ranking model served via ONNX Runtime for meal recommendations",
+    title="SparkyFitness Meal Ranker API (ONNX)",
+    description="XGBoost ranking model served via ONNX Runtime",
     version="1.0.0",
 )
 
 # ---------------------------------------------------------------------------
-# Feature schema
+# Feature schema — matches shared contract (contracts/recipe_ranker_input.sample.json)
 # ---------------------------------------------------------------------------
 
-RECIPE_NUMERIC_FEATURES = [
+FEATURE_COLUMNS = [
     "minutes", "n_ingredients", "n_steps", "avg_rating", "n_reviews",
+    "cuisine",
     "calories", "total_fat", "sugar", "sodium", "protein",
-    "saturated_fat", "carbohydrate", "total_fat_g", "sugar_g", "sodium_g",
-    "protein_g", "saturated_fat_g", "carbohydrate_g",
+    "saturated_fat", "carbohydrate",
+    "total_fat_g", "sugar_g", "sodium_g", "protein_g",
+    "saturated_fat_g", "carbohydrate_g",
     "has_egg", "has_fish", "has_milk", "has_nuts", "has_peanut",
     "has_sesame", "has_shellfish", "has_soy", "has_wheat",
-]
-
-USER_FEATURES = [
     "daily_calorie_target", "protein_target_g", "carbs_target_g", "fat_target_g",
     "user_vegetarian", "user_vegan", "user_gluten_free", "user_dairy_free",
     "user_low_sodium", "user_low_fat",
@@ -37,42 +37,29 @@ USER_FEATURES = [
     "history_pc5", "history_pc6",
 ]
 
-CUISINE_CATEGORIES = [
-    "african", "american", "asian", "chinese", "european", "french",
-    "german", "greek", "indian", "latin_american", "mexican",
-    "middle_eastern", "pacific", "scandinavian", "spanish", "unknown",
-]
-
-N_FEATURES = 59
-
 # ---------------------------------------------------------------------------
-# Request / response models
+# Request / response models — matches shared contract exactly
 # ---------------------------------------------------------------------------
 
 class PredictRequest(BaseModel):
-    user_id: Optional[int] = None
-    user_features: dict
-    candidate_recipes: list[dict]
+    request_id: str
+    model_name: str = "xgb_ranker"
+    instances: list[dict]
 
 
-class RankedRecipe(BaseModel):
-    rank: int
+class Prediction(BaseModel):
+    user_id: int
     recipe_id: int
-    name: str
-    relevance_score: float
-    calories: float
-    protein_g: float
-    carbohydrate_g: float
-    total_fat_g: float
-    minutes: float
-    cuisine: str
+    score: float
+    rank: int
 
 
 class PredictResponse(BaseModel):
-    user_id: Optional[int] = None
-    ranked_recipes: list[RankedRecipe]
+    request_id: str
+    model_name: str
     model_version: str
-    num_candidates_scored: int
+    generated_at: str
+    predictions: list[Prediction]
 
 # ---------------------------------------------------------------------------
 # Model loading
@@ -84,53 +71,32 @@ logger.info("Loading ONNX model from %s", MODEL_PATH)
 session = ort.InferenceSession(MODEL_PATH, providers=["CPUExecutionProvider"])
 input_name = session.get_inputs()[0].name
 output_names = [o.name for o in session.get_outputs()]
-# onnxmltools converts ranking models as classifiers with outputs: [label, probabilities]
-# We use probabilities[:,1] as the relevance score
 USE_PROBABILITIES = "probabilities" in output_names
 if USE_PROBABILITIES:
     logger.info("ONNX model has classifier outputs; using probabilities[:,1] as score")
-else:
-    logger.info("ONNX model has regressor output")
 logger.info("ONNX model loaded (input=%s, outputs=%s)", input_name, output_names)
 
 # ---------------------------------------------------------------------------
-# Feature assembly
+# Feature assembly — matches training code (src/ranking_data.py)
 # ---------------------------------------------------------------------------
 
-def _encode_cuisine(cuisine: str) -> list[float]:
-    """One-hot encode cuisine into a fixed-length vector."""
-    vec = [0.0] * len(CUISINE_CATEGORIES)
-    cuisine_lower = cuisine.lower().strip()
-    if cuisine_lower in CUISINE_CATEGORIES:
-        vec[CUISINE_CATEGORIES.index(cuisine_lower)] = 1.0
-    else:
-        vec[CUISINE_CATEGORIES.index("unknown")] = 1.0
-    return vec
+def assemble_features(instances: list[dict]) -> tuple[np.ndarray, list[int], list[int]]:
+    """Build feature matrix from flat instances matching the shared contract."""
+    df = pd.DataFrame(instances)
+    user_ids = df["user_id"].astype(int).tolist()
+    recipe_ids = df["recipe_id"].astype(int).tolist()
 
+    for col in FEATURE_COLUMNS:
+        if col not in df.columns:
+            df[col] = 0.0
+        if df[col].dtype == object or pd.api.types.is_string_dtype(df[col]):
+            categories = sorted(df[col].fillna("unknown").astype(str).unique())
+            cat_map = {v: i for i, v in enumerate(categories)}
+            df[col] = df[col].fillna("unknown").astype(str).map(cat_map).fillna(-1).astype(float)
+        else:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
 
-def assemble_features(
-    user_features: dict, candidate_recipes: list[dict]
-) -> np.ndarray:
-    """Build a (n_candidates, 59) feature matrix."""
-    n = len(candidate_recipes)
-    features = np.zeros((n, N_FEATURES), dtype=np.float32)
-
-    user_vals = [float(user_features.get(f, 0.0)) for f in USER_FEATURES]
-
-    for i, recipe in enumerate(candidate_recipes):
-        idx = 0
-        for f in RECIPE_NUMERIC_FEATURES:
-            features[i, idx] = float(recipe.get(f, 0.0))
-            idx += 1
-        for v in user_vals:
-            features[i, idx] = v
-            idx += 1
-        cuisine_vec = _encode_cuisine(recipe.get("cuisine", "unknown"))
-        for v in cuisine_vec:
-            features[i, idx] = v
-            idx += 1
-
-    return features
+    return df[FEATURE_COLUMNS].values.astype(np.float32), user_ids, recipe_ids
 
 # ---------------------------------------------------------------------------
 # Endpoints
@@ -138,54 +104,40 @@ def assemble_features(
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "model": "xgboost_ranker", "backend": "onnxruntime"}
+    return {"status": "healthy", "model": "xgb_ranker", "backend": "onnxruntime"}
 
 
 @app.post("/predict", response_model=PredictResponse)
 def predict(request: PredictRequest):
     try:
-        candidates = request.candidate_recipes
-        if not candidates:
-            raise HTTPException(status_code=400, detail="candidate_recipes must not be empty")
+        if not request.instances:
+            raise HTTPException(status_code=400, detail="instances must not be empty")
 
-        # Assemble feature matrix
-        feature_matrix = assemble_features(request.user_features, candidates)
+        feature_matrix, user_ids, recipe_ids = assemble_features(request.instances)
 
-        # Run ONNX inference
         results = session.run(None, {input_name: feature_matrix})
         if USE_PROBABILITIES:
-            # probabilities shape: (n, 2) — use column 1 as relevance score
             scores = results[1][:, 1].flatten()
         else:
             scores = results[0].flatten()
 
-        # Build ranked results
-        indexed_scores = list(enumerate(scores))
-        indexed_scores.sort(key=lambda x: x[1], reverse=True)
-
-        ranked_recipes = []
-        for rank, (idx, score) in enumerate(indexed_scores, start=1):
-            recipe = candidates[idx]
-            ranked_recipes.append(
-                RankedRecipe(
-                    rank=rank,
-                    recipe_id=recipe["recipe_id"],
-                    name=recipe.get("name", ""),
-                    relevance_score=round(float(score), 3),
-                    calories=float(recipe.get("calories", 0.0)),
-                    protein_g=float(recipe.get("protein_g", 0.0)),
-                    carbohydrate_g=float(recipe.get("carbohydrate_g", 0.0)),
-                    total_fat_g=float(recipe.get("total_fat_g", 0.0)),
-                    minutes=float(recipe.get("minutes", 0.0)),
-                    cuisine=recipe.get("cuisine", "unknown"),
-                )
+        sorted_indices = np.argsort(scores)[::-1]
+        predictions = [
+            Prediction(
+                user_id=user_ids[int(idx)],
+                recipe_id=recipe_ids[int(idx)],
+                score=round(float(scores[idx]), 4),
+                rank=rank,
             )
+            for rank, idx in enumerate(sorted_indices, start=1)
+        ]
 
         return PredictResponse(
-            user_id=request.user_id,
-            ranked_recipes=ranked_recipes,
-            model_version="xgboost_ranker_v1_onnx",
-            num_candidates_scored=len(candidates),
+            request_id=request.request_id,
+            model_name=request.model_name,
+            model_version="v1_onnx",
+            generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            predictions=predictions,
         )
 
     except HTTPException:
@@ -195,5 +147,4 @@ def predict(request: PredictRequest):
         raise HTTPException(status_code=500, detail=f"Inference error: {str(e)}")
 
 
-# Prometheus metrics
 Instrumentator().instrument(app).expose(app)

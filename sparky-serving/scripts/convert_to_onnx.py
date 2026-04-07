@@ -16,7 +16,7 @@ from onnxmltools.convert.common.data_types import FloatTensorType
 DEFAULT_INPUT = os.path.join(os.path.dirname(__file__), "..", "models", "xgboost_ranker.json")
 DEFAULT_OUTPUT = os.path.join(os.path.dirname(__file__), "..", "models", "xgboost_ranker.onnx")
 
-N_FEATURES = 59
+N_FEATURES = 44
 
 
 def main():

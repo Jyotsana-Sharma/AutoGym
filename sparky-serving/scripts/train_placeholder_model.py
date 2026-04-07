@@ -1,105 +1,70 @@
 """
-Train a placeholder XGBoost ranking model from the data team's training table.
-Produces: models/xgboost_ranker.json (native) for serving experiments.
+Generate a placeholder XGBoost ranking model for serving benchmarks.
+
+Creates a valid model from synthetic data — no external CSVs needed.
+The model accepts 44 float features and returns relevance scores,
+matching the shared contract interface.
+
+Usage:
+    python scripts/train_placeholder_model.py
 """
 
-import pandas as pd
-import xgboost as xgb
-import numpy as np
 import json
 import os
 
+import numpy as np
+import xgboost as xgb
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-SERVING_DIR = os.path.dirname(SCRIPT_DIR)
-DATA_DIR = os.environ.get("DATA_DIR", os.path.join(SERVING_DIR, "data"))
-MODEL_DIR = os.path.join(SERVING_DIR, "models")
+MODEL_DIR = os.path.join(os.path.dirname(SCRIPT_DIR), "models")
 
-# --- Feature columns (exclude identifiers, labels, and non-numeric) ---
-ID_COLS = ["user_id", "recipe_id", "date", "rating", "label", "name"]
-CUISINE_COL = "cuisine"
+FEATURE_NAMES = [
+    "minutes", "n_ingredients", "n_steps", "avg_rating", "n_reviews", "cuisine",
+    "calories", "total_fat", "sugar", "sodium", "protein", "saturated_fat", "carbohydrate",
+    "total_fat_g", "sugar_g", "sodium_g", "protein_g", "saturated_fat_g", "carbohydrate_g",
+    "has_egg", "has_fish", "has_milk", "has_nuts", "has_peanut", "has_sesame",
+    "has_shellfish", "has_soy", "has_wheat",
+    "daily_calorie_target", "protein_target_g", "carbs_target_g", "fat_target_g",
+    "user_vegetarian", "user_vegan", "user_gluten_free", "user_dairy_free",
+    "user_low_sodium", "user_low_fat",
+    "history_pc1", "history_pc2", "history_pc3", "history_pc4",
+    "history_pc5", "history_pc6",
+]
 
-def load_and_prepare(csv_path):
-    df = pd.read_csv(csv_path)
-    # One-hot encode cuisine
-    df = pd.get_dummies(df, columns=[CUISINE_COL], prefix="cuisine")
-    feature_cols = [c for c in df.columns if c not in ID_COLS]
-    return df, feature_cols
+N_FEATURES = len(FEATURE_NAMES)  # 44
 
-def build_group_sizes(df):
-    """Build group sizes for ranking: group by user_id."""
-    groups = df.groupby("user_id").size().values
-    return groups
 
 def main():
-    print("Loading training data...")
-    train_df, feature_cols = load_and_prepare(os.path.join(DATA_DIR, "train.csv"))
-    val_df = pd.read_csv(os.path.join(DATA_DIR, "val.csv"))
-    val_df = pd.get_dummies(val_df, columns=[CUISINE_COL], prefix="cuisine")
+    rng = np.random.default_rng(42)
 
-    # Align columns (val may have missing cuisine dummies)
-    for col in feature_cols:
-        if col not in val_df.columns:
-            val_df[col] = 0
-    val_df = val_df[[c for c in train_df.columns if c in val_df.columns]]
+    n_users, recipes_per_user = 20, 10
+    n_rows = n_users * recipes_per_user
 
-    X_train = train_df[feature_cols].values.astype(np.float32)
-    y_train = train_df["label"].values.astype(np.float32)
-    groups_train = build_group_sizes(train_df)
+    X = rng.standard_normal((n_rows, N_FEATURES)).astype(np.float32)
+    labels = rng.integers(0, 5, size=n_rows).astype(np.float32)
+    groups = np.full(n_users, recipes_per_user)
 
-    X_val = val_df[feature_cols].values.astype(np.float32)
-    y_val = val_df["label"].values.astype(np.float32)
-    groups_val = build_group_sizes(val_df)
+    dtrain = xgb.DMatrix(X, label=labels)
+    dtrain.set_group(groups)
 
-    print(f"Train: {X_train.shape[0]} rows, {X_train.shape[1]} features")
-    print(f"Val:   {X_val.shape[0]} rows")
-    print(f"Train groups: {len(groups_train)}, Val groups: {len(groups_val)}")
-
-    dtrain = xgb.DMatrix(X_train, label=y_train)
-    dtrain.set_group(groups_train)
-
-    dval = xgb.DMatrix(X_val, label=y_val)
-    dval.set_group(groups_val)
-
-    params = {
-        "objective": "rank:ndcg",
-        "eval_metric": "ndcg",
-        "eta": 0.1,
-        "max_depth": 6,
-        "subsample": 0.8,
-        "colsample_bytree": 0.8,
-        "tree_method": "hist",
-        "seed": 42,
-    }
-
-    print("Training XGBoost ranker...")
     model = xgb.train(
-        params,
+        {"objective": "rank:ndcg", "eta": 0.1, "max_depth": 4, "seed": 42},
         dtrain,
-        num_boost_round=100,
-        evals=[(dtrain, "train"), (dval, "val")],
-        verbose_eval=20,
+        num_boost_round=50,
     )
 
     os.makedirs(MODEL_DIR, exist_ok=True)
+
     model_path = os.path.join(MODEL_DIR, "xgboost_ranker.json")
     model.save_model(model_path)
-    print(f"Model saved to {model_path}")
+    print(f"Model saved: {model_path}")
 
-    # Save feature names for serving
-    meta = {
-        "feature_names": feature_cols,
-        "n_features": len(feature_cols),
-        "n_trees": model.num_boosted_rounds(),
-    }
+    meta = {"feature_names": FEATURE_NAMES, "n_features": N_FEATURES}
     meta_path = os.path.join(MODEL_DIR, "model_meta.json")
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
-    print(f"Model metadata saved to {meta_path}")
+    print(f"Metadata saved: {meta_path}")
 
-    # Quick sanity check
-    preds = model.predict(dval)
-    print(f"Sample predictions (first 10): {preds[:10]}")
-    print(f"Prediction range: [{preds.min():.4f}, {preds.max():.4f}]")
 
 if __name__ == "__main__":
     main()

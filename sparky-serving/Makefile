@@ -1,6 +1,6 @@
 .PHONY: build-baseline build-onnx build-optimized build-triton \
        run-baseline run-onnx run-optimized run-triton \
-       benchmark stop clean
+       benchmark benchmark-triton benchmark-triton-batching stop clean
 
 # --- Build ---
 build-baseline:
@@ -36,6 +36,14 @@ run-triton:
 benchmark:
 	mkdir -p results
 	python3 scripts/benchmark.py --url http://localhost:8000
+
+benchmark-triton:
+	mkdir -p results
+	python3 scripts/benchmark.py --url http://localhost:8000 --triton --model-name meal_ranker
+
+benchmark-triton-batching:
+	mkdir -p results
+	python3 scripts/benchmark.py --url http://localhost:8000 --triton --model-name meal_ranker_batching
 
 # --- Stop whichever is running ---
 stop:

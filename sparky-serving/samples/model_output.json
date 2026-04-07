@@ -1,43 +1,20 @@
 {
-  "user_id": 38094,
-  "ranked_recipes": [
+  "request_id": "req_rank_001",
+  "model_name": "xgb_ranker",
+  "model_version": "v1",
+  "generated_at": "2026-04-05T12:00:00Z",
+  "predictions": [
     {
-      "rank": 1,
-      "recipe_id": 137739,
-      "name": "arriba baked winter squash mexican style",
-      "relevance_score": 4.407,
-      "calories": 51.5,
-      "protein_g": 1.0,
-      "carbohydrate_g": 11.0,
-      "total_fat_g": 0.0,
-      "minutes": 55.0,
-      "cuisine": "american"
+      "user_id": 37449,
+      "recipe_id": 33096,
+      "score": 1.8421,
+      "rank": 1
     },
     {
-      "rank": 2,
-      "recipe_id": 31490,
-      "name": "grilled chicken caesar salad",
-      "relevance_score": 0.172,
-      "calories": 450.0,
-      "protein_g": 22.5,
-      "carbohydrate_g": 33.0,
-      "total_fat_g": 17.16,
-      "minutes": 30.0,
-      "cuisine": "american"
-    },
-    {
-      "rank": 3,
-      "recipe_id": 112140,
-      "name": "spicy tofu stir fry",
-      "relevance_score": -0.281,
-      "calories": 320.0,
-      "protein_g": 9.0,
-      "carbohydrate_g": 77.0,
-      "total_fat_g": 10.92,
-      "minutes": 25.0,
-      "cuisine": "asian"
+      "user_id": 37449,
+      "recipe_id": 120964,
+      "score": 0.9174,
+      "rank": 2
     }
-  ],
-  "model_version": "xgboost_ranker_v1",
-  "num_candidates_scored": 3
+  ]
 }

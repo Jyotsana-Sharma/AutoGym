@@ -1,3 +1,4 @@
+name: sparky-triton
 services:
   triton_server:
     build:

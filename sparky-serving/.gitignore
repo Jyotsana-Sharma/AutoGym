@@ -1,0 +1,12 @@
+# Model artifacts — test fixtures, not deliverables
+models/
+triton/model_repository/*/1/*.json
+triton/model_repository/*/1/*.onnx
+
+# Benchmark results (generated on Chameleon)
+results/
+
+# Python
+__pycache__/
+*.pyc
+.env
