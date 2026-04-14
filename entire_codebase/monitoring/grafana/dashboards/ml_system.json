@@ -1,0 +1,88 @@
+{
+  "title": "SparkyFitness ML System",
+  "uid": "sparky-ml-system",
+  "timezone": "browser",
+  "refresh": "30s",
+  "schemaVersion": 38,
+  "panels": [
+    {
+      "title": "Serving Status",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 0},
+      "targets": [{"expr": "up{job='sparky-serving'}", "legendFormat": "Serving"}],
+      "options": {"reduceOptions": {"calcs": ["last"]}, "orientation": "auto", "colorMode": "background"},
+      "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}]}}
+    },
+    {
+      "title": "Model Version",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 4, "y": 0},
+      "targets": [{"expr": "sparky_model_version", "legendFormat": "Version"}],
+      "options": {"reduceOptions": {"calcs": ["last"]}}
+    },
+    {
+      "title": "Predictions / sec",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 8, "y": 0},
+      "targets": [{"expr": "rate(sparky_predictions_total[5m])", "legendFormat": "pred/s"}],
+      "options": {"reduceOptions": {"calcs": ["mean"]}}
+    },
+    {
+      "title": "P95 Latency (ms)",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 12, "y": 0},
+      "targets": [{"expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{handler='/predict'}[5m])) * 1000", "legendFormat": "p95"}],
+      "options": {"reduceOptions": {"calcs": ["last"]}},
+      "fieldConfig": {"defaults": {"unit": "ms", "thresholds": {"steps": [{"value": 0, "color": "green"}, {"value": 200, "color": "yellow"}, {"value": 500, "color": "red"}]}}}
+    },
+    {
+      "title": "Error Rate (%)",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 16, "y": 0},
+      "targets": [{"expr": "100 * rate(http_requests_total{job='sparky-serving',status=~'5..'}[5m]) / rate(http_requests_total{job='sparky-serving'}[5m])", "legendFormat": "error%"}],
+      "options": {"reduceOptions": {"calcs": ["last"]}},
+      "fieldConfig": {"defaults": {"unit": "percent", "thresholds": {"steps": [{"value": 0, "color": "green"}, {"value": 1, "color": "yellow"}, {"value": 5, "color": "red"}]}}}
+    },
+    {
+      "title": "Prediction Score Distribution",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "targets": [
+        {"expr": "histogram_quantile(0.5, rate(sparky_prediction_score_bucket[10m]))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.9, rate(sparky_prediction_score_bucket[10m]))", "legendFormat": "p90"},
+        {"expr": "histogram_quantile(0.1, rate(sparky_prediction_score_bucket[10m]))", "legendFormat": "p10"}
+      ],
+      "fieldConfig": {"defaults": {"min": 0, "max": 1}},
+      "options": {"legend": {"displayMode": "list"}}
+    },
+    {
+      "title": "Request Latency Percentiles",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "targets": [
+        {"expr": "histogram_quantile(0.5, rate(http_request_duration_seconds_bucket{handler='/predict'}[5m]))*1000", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{handler='/predict'}[5m]))*1000", "legendFormat": "p95"},
+        {"expr": "histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{handler='/predict'}[5m]))*1000", "legendFormat": "p99"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "ms"}}
+    },
+    {
+      "title": "PostgreSQL Active Connections",
+      "type": "timeseries",
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 12},
+      "targets": [{"expr": "pg_stat_activity_count{datname='sparky'}", "legendFormat": "connections"}]
+    },
+    {
+      "title": "Model Reloads",
+      "type": "timeseries",
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 12},
+      "targets": [{"expr": "rate(sparky_model_reloads_total[1h])", "legendFormat": "reloads/h"}]
+    },
+    {
+      "title": "Batch Size Distribution",
+      "type": "timeseries",
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 12},
+      "targets": [{"expr": "histogram_quantile(0.5, rate(sparky_request_batch_size_bucket[5m]))", "legendFormat": "median batch size"}]
+    }
+  ]
+}

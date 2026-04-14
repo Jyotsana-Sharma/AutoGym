@@ -1,0 +1,189 @@
+name: Scheduled Retraining Pipeline
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "output/manifest.json"
+      - "configs/data/soda_checks.yml"
+      - "configs/training/**"
+      - "src/training/**"
+
+  schedule:
+    - cron: "0 2 * * 0"   # Sunday 2 AM UTC — weekly forced retraining
+
+  workflow_dispatch:
+    inputs:
+      auto_promote:
+        description: "Auto-promote to Production if quality gates pass"
+        required: false
+        default: "false"
+      config:
+        description: "Training config path"
+        required: false
+        default: "configs/training/xgb_ranker.yaml"
+
+env:
+  MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+  POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+  OS_AUTH_URL: ${{ secrets.OS_AUTH_URL }}
+  OS_APPLICATION_CREDENTIAL_ID: ${{ secrets.OS_APPLICATION_CREDENTIAL_ID }}
+  OS_APPLICATION_CREDENTIAL_SECRET: ${{ secrets.OS_APPLICATION_CREDENTIAL_SECRET }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Data Quality Gate
+  # ---------------------------------------------------------------------------
+  data-quality:
+    name: Data Quality Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install data deps
+        run: pip install -r requirements/data.txt
+
+      - name: Run Soda data quality checks
+        run: |
+          python src/data/run_soda_checks.py \
+            --train-csv output/train.csv \
+            --val-csv output/val.csv \
+            --test-csv output/test.csv
+
+      - name: Run drift report (no trigger in CI)
+        run: |
+          python src/data/drift_monitor.py --report-only | tee /tmp/drift_report.json || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: drift-report
+          path: /tmp/drift_report.json
+
+  # ---------------------------------------------------------------------------
+  # 2. Training + Evaluation + Registration
+  # ---------------------------------------------------------------------------
+  train-and-register:
+    name: Train, Evaluate, Register
+    runs-on: ubuntu-latest
+    needs: data-quality
+    outputs:
+      model_version: ${{ steps.extract.outputs.model_version }}
+      registered: ${{ steps.extract.outputs.registered }}
+      ndcg: ${{ steps.extract.outputs.ndcg }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install training deps
+        run: pip install -r requirements/training.txt
+
+      - name: Download training data from Swift (if available)
+        continue-on-error: true
+        run: |
+          pip install python-swiftclient
+          python -c "
+          import swiftclient, os, pathlib
+          try:
+              conn = swiftclient.Connection(
+                  auth_version='3', authurl=os.environ['OS_AUTH_URL'],
+                  os_options={
+                      'application_credential_id': os.environ['OS_APPLICATION_CREDENTIAL_ID'],
+                      'application_credential_secret': os.environ['OS_APPLICATION_CREDENTIAL_SECRET'],
+                  })
+              pathlib.Path('output').mkdir(exist_ok=True)
+              for split in ['train.csv', 'val.csv', 'test.csv']:
+                  _, content = conn.get_object('proj04-sparky-training-data', split)
+                  pathlib.Path('output', split).write_bytes(content)
+                  print(f'Downloaded {split}')
+          except Exception as e:
+              print(f'Swift unavailable: {e}. Using repo output/.')
+          "
+
+      - name: Run training pipeline
+        id: train
+        run: |
+          CONFIG="${{ github.event.inputs.config || 'configs/training/xgb_ranker.yaml' }}"
+          python -m src.training.retrain_pipeline \
+            --config "$CONFIG" \
+            --skip-data-checks \
+            > /tmp/train_result.json
+          cat /tmp/train_result.json
+
+      - name: Extract results
+        id: extract
+        run: |
+          python -c "
+          import json, sys
+          r = json.load(open('/tmp/train_result.json'))
+          print('registered=' + str(r.get('registered', False)).lower())
+          print('model_version=' + str(r.get('model_version', '')))
+          print('ndcg=' + str(r.get('metrics', {}).get('ndcg_at_10', 0)))
+          if not r.get('success'):
+              print(f'FAILED: {r.get(\"failure_reason\")}', file=sys.stderr)
+              sys.exit(1)
+          " >> $GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: training-results
+          path: /tmp/train_result.json
+
+  # ---------------------------------------------------------------------------
+  # 3. Auto-promote (schedule-triggered or explicit input)
+  # ---------------------------------------------------------------------------
+  auto-promote:
+    name: Promote to Production
+    runs-on: ubuntu-latest
+    needs: train-and-register
+    if: |
+      needs.train-and-register.outputs.registered == 'true' &&
+      (github.event.inputs.auto_promote == 'true' || github.event_name == 'schedule')
+    environment:
+      name: production
+      url: ${{ secrets.SERVING_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install MLflow
+        run: pip install mlflow>=3.1.0
+      - name: Promote model
+        run: |
+          python -m src.training.model_registry promote \
+            --version "${{ needs.train-and-register.outputs.model_version }}"
+      - name: Hot-reload serving
+        run: curl -s -X POST "${{ secrets.SERVING_URL }}/admin/reload" || true
+      - name: Smoke test
+        run: |
+          pip install requests
+          python scripts/smoke_test.py --url "${{ secrets.SERVING_URL }}"
+
+  # ---------------------------------------------------------------------------
+  # 4. Auto-rollback if smoke test fails
+  # ---------------------------------------------------------------------------
+  rollback-on-failure:
+    name: Rollback on Failure
+    runs-on: ubuntu-latest
+    needs: [train-and-register, auto-promote]
+    if: failure() && needs.train-and-register.outputs.registered == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install mlflow>=3.1.0
+      - name: Rollback
+        run: |
+          python -m src.training.model_registry rollback
+          curl -s -X POST "${{ secrets.SERVING_URL }}/admin/reload" || true
+          echo "::warning::Rolled back — model version ${{ needs.train-and-register.outputs.model_version }} reverted"

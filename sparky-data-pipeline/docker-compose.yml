@@ -1,0 +1,106 @@
+services:
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: sparky-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sparky
+      POSTGRES_USER: sparky
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sparky_pass}
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./configs/init_db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sparky"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  ingest:
+    build: .
+    container_name: sparky-ingest
+    command: >
+      python scripts/ingest_to_object_store.py
+        --local-dir /data
+        --expand
+    volumes:
+      - ./data:/data
+      - ./output:/output
+      - ./scripts:/app/scripts:ro
+    environment:
+      OS_AUTH_URL: ${OS_AUTH_URL}
+      OS_APPLICATION_CREDENTIAL_ID: ${OS_APPLICATION_CREDENTIAL_ID}
+      OS_APPLICATION_CREDENTIAL_SECRET: ${OS_APPLICATION_CREDENTIAL_SECRET}
+      OS_REGION_NAME: ${OS_REGION_NAME:-CHI@TACC}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles: ["ingest"]
+
+  data-generator:
+    build: .
+    container_name: sparky-data-generator
+    command: >
+      python scripts/data_generator.py
+        --interactions-path /data/RAW_interactions.csv
+        --recipes-path /data/enriched_recipes.csv
+        --api-url http://host.docker.internal:8000
+        --db-url postgresql://sparky:${POSTGRES_PASSWORD:-sparky_pass}@postgres:5432/sparky
+        --offline
+        --days 7
+        --rate 50
+        --log-file /output/generated_interactions.csv
+    volumes:
+      - ./data:/data
+      - ./output:/output
+      - ./scripts:/app/scripts:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles: ["generate"]
+
+  online-feature-demo:
+    build: .
+    container_name: sparky-online-features
+    command: >
+      python scripts/online_feature_pipeline.py
+        --recipes-path /data/enriched_recipes.csv
+        --db-url postgresql://sparky:${POSTGRES_PASSWORD:-sparky_pass}@postgres:5432/sparky
+        --demo
+    volumes:
+      - ./data:/data
+      - ./scripts:/app/scripts:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles: ["online-demo"]
+
+  batch-pipeline:
+    build: .
+    container_name: sparky-batch-pipeline
+    command: >
+      python scripts/batch_pipeline.py
+        --raw-dir /data
+        --output-dir /output
+        --db-url postgresql://sparky:${POSTGRES_PASSWORD:-sparky_pass}@postgres:5432/sparky
+        --upload
+    volumes:
+      - ./data:/data
+      - ./output:/output
+      - ./scripts:/app/scripts:ro
+    environment:
+      OS_AUTH_URL: ${OS_AUTH_URL}
+      OS_APPLICATION_CREDENTIAL_ID: ${OS_APPLICATION_CREDENTIAL_ID}
+      OS_APPLICATION_CREDENTIAL_SECRET: ${OS_APPLICATION_CREDENTIAL_SECRET}
+      OS_REGION_NAME: ${OS_REGION_NAME:-CHI@TACC}
+      GIT_COMMIT: ${GIT_COMMIT:-unknown}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles: ["batch"]
+
+volumes:
+  pgdata:

@@ -1,0 +1,10 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+xgboost>=2.0.0
+numpy>=1.26.0
+pandas>=2.2.0
+pydantic>=2.0.0
+prometheus-fastapi-instrumentator>=7.0.0
+prometheus-client>=0.20.0
+mlflow>=3.1.0
+asyncpg>=0.29.0

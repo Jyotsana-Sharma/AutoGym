@@ -1,0 +1,163 @@
+groups:
+  # ==========================================================================
+  # Model Serving Alerts
+  # ==========================================================================
+  - name: serving
+    rules:
+      - alert: ServingDown
+        expr: up{job="sparky-serving"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SparkyFitness serving is DOWN"
+          description: "The serving API has been unreachable for more than 1 minute."
+
+      - alert: HighPredictionLatency
+        expr: >
+          histogram_quantile(0.95,
+            rate(http_request_duration_seconds_bucket{job="sparky-serving", handler="/predict"}[5m])
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "P95 prediction latency > 500ms"
+          description: "P95 latency is {{ $value | humanizeDuration }} over the last 5m."
+
+      - alert: HighErrorRate
+        expr: >
+          rate(http_requests_total{job="sparky-serving", status=~"5.."}[5m])
+          / rate(http_requests_total{job="sparky-serving"}[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Error rate > 5% on serving"
+          description: "{{ $value | humanizePercentage }} of requests are failing."
+
+      - alert: LowPredictionScores
+        expr: >
+          histogram_quantile(0.5, rate(sparky_prediction_score_bucket[10m])) < 0.2
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Median prediction score unusually low"
+          description: >
+            Median prediction score is {{ $value | humanize }}.
+            This may indicate model degradation or a data quality issue.
+
+      - alert: ZeroPredictionsServed
+        expr: rate(sparky_predictions_total[10m]) == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No predictions served in last 10 minutes"
+          description: "Possible serving outage or traffic issue."
+
+      - alert: ModelVersionStale
+        expr: >
+          (time() - sparky_model_version * 0) > 86400
+        for: 1h
+        labels:
+          severity: info
+        annotations:
+          summary: "Model version has not changed in 24 hours"
+          description: "Consider checking if retraining is scheduled."
+
+  # ==========================================================================
+  # Infrastructure Alerts
+  # ==========================================================================
+  - name: infrastructure
+    rules:
+      - alert: PostgresDown
+        expr: up{job="postgres"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL is unreachable"
+          description: "The PostgreSQL database has been unreachable for more than 1 minute."
+
+      - alert: MLflowDown
+        expr: up{job="mlflow"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MLflow tracking server is DOWN"
+          description: "MLflow has been unreachable for 2+ minutes. Model registration unavailable."
+
+      - alert: HighMemoryUsage
+        expr: >
+          container_memory_usage_bytes{name=~"sparky-.*"} /
+          container_spec_memory_limit_bytes{name=~"sparky-.*"} > 0.85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container memory usage > 85%"
+          description: "Container {{ $labels.name }} is using {{ $value | humanizePercentage }} memory."
+
+      - alert: HighDiskUsage
+        expr: >
+          (node_filesystem_size_bytes{mountpoint="/"} -
+           node_filesystem_free_bytes{mountpoint="/"}) /
+           node_filesystem_size_bytes{mountpoint="/"} > 0.85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk usage > 85%"
+          description: "Disk at {{ $value | humanizePercentage }} capacity. MLflow artifacts may fill disk."
+
+      - alert: PostgresHighConnections
+        expr: pg_stat_activity_count{datname="sparky"} > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PostgreSQL connection count > 80"
+          description: "Currently {{ $value }} connections. Max is typically 100."
+
+  # ==========================================================================
+  # Retraining Pipeline Alerts
+  # ==========================================================================
+  - name: retraining
+    rules:
+      - alert: RetrainingJobFailed
+        expr: >
+          increase(sparky_retrain_failures_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Retraining job failed"
+          description: "A retraining job has failed in the last hour. Check retrain-api logs."
+
+      - alert: NoRetrainingIn7Days
+        expr: >
+          time() - sparky_last_retrain_timestamp_seconds > 604800
+        for: 1h
+        labels:
+          severity: info
+        annotations:
+          summary: "No retraining in 7 days"
+          description: "The model has not been retrained in 7 days. Drift may be accumulating."
+
+  # ==========================================================================
+  # Data Quality Alerts
+  # ==========================================================================
+  - name: data-quality
+    rules:
+      - alert: PredictionLoggingLag
+        expr: >
+          time() - pg_stat_activity_query_start{query=~".*prediction_log.*"} > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Prediction logging is lagging > 5 minutes"
+          description: "Feedback loop may be impaired."

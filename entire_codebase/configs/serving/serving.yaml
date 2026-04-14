@@ -1,0 +1,14 @@
+# SparkyFitness Serving Configuration
+serving:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 2
+  model_poll_interval_sec: 60   # how often to check MLflow for a new Production version
+  log_predictions: true
+
+model:
+  name: "sparky-ranker"                    # MLflow registered model name
+  fallback_path: "/models/xgboost_ranker.json"
+
+database:
+  prediction_log_retention_days: 90        # inference_features rows older than this are deleted
