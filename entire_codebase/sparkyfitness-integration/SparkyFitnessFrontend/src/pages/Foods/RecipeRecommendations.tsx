@@ -12,11 +12,11 @@
  */
 
 import { useCallback, useState } from "react";
-import { RecommendedMeal } from "@/api/recommendations";
 import {
   useRecommendations,
   useRecommendationFeedback,
   useInvalidateRecommendations,
+  RecommendedMeal,
 } from "@/hooks/Foods/useRecommendations";
 
 // ---------------------------------------------------------------------------

@@ -4,6 +4,8 @@ import {
   postRecommendationFeedback,
 } from '@/api/recommendations';
 
+export type { RecommendedMeal, RecommendationsResponse } from '@/api/recommendations';
+
 export const useRecommendations = (
   mealType: 'breakfast' | 'lunch' | 'dinner' | 'snack' | 'any' = 'any',
   limit: number = 6
