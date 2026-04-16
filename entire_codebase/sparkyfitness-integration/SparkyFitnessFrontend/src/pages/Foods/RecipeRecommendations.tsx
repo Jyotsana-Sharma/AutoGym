@@ -12,12 +12,12 @@
  */
 
 import { useCallback, useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { RecommendedMeal } from "@/api/recommendations";
 import {
-  fetchRecommendations,
-  postRecommendationFeedback,
-  RecommendedMeal,
-} from "../../api/recommendations";
+  useRecommendations,
+  useRecommendationFeedback,
+  useInvalidateRecommendations,
+} from "@/hooks/Foods/useRecommendations";
 
 // ---------------------------------------------------------------------------
 // Sub-components
@@ -139,27 +139,14 @@ export default function RecipeRecommendations({
   limit = 6,
   onLogMeal,
 }: Props) {
-  const queryClient = useQueryClient();
+  const invalidateRecommendations = useInvalidateRecommendations();
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
 
   // ── Fetch recommendations ──────────────────────────────────────────────────
-  const { data, isLoading, isError, refetch } = useQuery({
-    queryKey: ["recommendations", mealType, limit],
-    queryFn: () => fetchRecommendations({ limit: limit * 2, mealType }),
-    staleTime: 5 * 60 * 1000,   // 5 min cache
-    retry: 1,
-  });
+  const { data, isLoading, isError, refetch } = useRecommendations(mealType, limit);
 
   // ── Feedback mutation ──────────────────────────────────────────────────────
-  const feedbackMutation = useMutation({
-    mutationFn: ({
-      id,
-      action,
-    }: {
-      id: string;
-      action: "viewed" | "logged" | "dismissed" | "saved";
-    }) => postRecommendationFeedback(id, action),
-  });
+  const feedbackMutation = useRecommendationFeedback();
 
   // ── Handlers ──────────────────────────────────────────────────────────────
   const handleLog = useCallback(
@@ -213,9 +200,7 @@ export default function RecipeRecommendations({
         <button
           onClick={() => {
             setDismissed(new Set());
-            queryClient.invalidateQueries({
-              queryKey: ["recommendations"],
-            });
+            invalidateRecommendations();
           }}
           className="text-xs text-indigo-600 hover:underline"
         >
