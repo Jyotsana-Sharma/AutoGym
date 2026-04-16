@@ -226,6 +226,7 @@ services:
         condition: service_healthy
     volumes:
       - models-cache:/models
+      - mlflow-artifacts:/app/local/mlartifacts
       - ./output/enriched_recipes.csv:/data/enriched_recipes.csv:ro
     environment:
       <<: *common-env
