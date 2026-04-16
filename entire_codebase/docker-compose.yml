@@ -124,7 +124,7 @@ services:
       DATABASE_URL: postgresql://sparky:${POSTGRES_PASSWORD:-sparky_pass}@postgres:5432/sparky
       OUTPUT_PATH: /training-data
     command: >
-      sh -c "python src/data/batch_pipeline.py &&
+      sh -c "python src/data/batch_pipeline.py --raw-dir /data --output-dir /output &&
              cp /output/train.csv /training-data/train.csv &&
              cp /output/val.csv /training-data/val.csv &&
              cp /output/test.csv /training-data/test.csv &&
