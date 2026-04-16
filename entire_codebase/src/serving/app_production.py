@@ -61,6 +61,7 @@ mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 ID_COLUMNS = ["user_id", "recipe_id"]
 
 FEATURE_COLUMNS = [
+    "rating",
     "minutes", "n_ingredients", "n_steps", "avg_rating", "n_reviews",
     "cuisine",
     "calories", "total_fat", "sugar", "sodium", "protein",
@@ -253,7 +254,7 @@ async def predict(request: PredictRequest):
 
     try:
         feature_matrix, user_ids, recipe_ids = assemble_features(request.instances)
-        dmatrix = xgb.DMatrix(feature_matrix)
+        dmatrix = xgb.DMatrix(feature_matrix, feature_names=FEATURE_COLUMNS)
         dmatrix.set_group([len(request.instances)])
         scores = model.predict(dmatrix)
     except Exception as exc:
