@@ -659,123 +659,61 @@ If this fails, check your `OS_APPLICATION_CREDENTIAL_ID` and `OS_APPLICATION_CRE
 
 ---
 
-### Step 19 — Run the data pipeline
+### Step 19 — Start the integrated ML system
+
+Use the repo’s current compose profiles instead of the older manual
+multi-step startup flow.
 
 ```bash
-make data
+cd ~/sparky-ml
 
-# The pipeline:
-#   1. Downloads RAW_recipes.csv + RAW_interactions.csv from CHI@TACC Swift
-#   2. Runs feature engineering (build_training_table.py)
-#   3. Runs Soda data quality checks (11 checks on enriched_recipes,
-#      4 checks on each of train/val/test) — pipeline aborts if any fail
-#   4. Writes train/val/test splits to the Docker training-data volume
-#   5. Uploads versioned splits back to proj04-sparky-training-data in Swift
-#
-# Takes 3–8 minutes. Completed output looks like:
-# SODA QUALITY REPORT
-#   Total checks:  23
-#   Passed:        23
-#   Failed:        0
-#   Result: PASS ✓
-# DONE: Batch Pipeline Complete
-# Train: ~80,000 rows  Val: ~10,000 rows  Test: ~10,000 rows
+# 1. Start the end-to-end ML pipeline
+docker compose --profile pipeline up -d
+
+# 2. Start the monitoring UI stack
+docker compose --profile monitoring up -d prometheus alertmanager grafana postgres-exporter
+
+# 3. Start production-traffic emulation
+docker compose --profile data up -d data-generator
+```
+
+What this does:
+- `batch-pipeline` compiles `train.csv`, `val.csv`, `test.csv`, and `manifest.json`
+- `trainer` runs retraining and registers a passing model to MLflow
+- `serving` loads the Production model and exposes `/predict`, `/feedback`, and `/explain`
+- `retrain-api` enables retraining, promotion, and rollback calls
+- `drift-monitor` runs ingestion checks, training-set checks, drift checks, and privacy cleanup
+- `data-generator` replays held-out rows through the real serving endpoints to emulate production traffic
+
+Wait 2–5 minutes on first start, then verify:
+
+```bash
+docker ps --filter "name=sparky-" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+curl http://localhost:8000/health
+curl http://localhost:5000/health
+```
+
+Expected health output:
+
+```json
+{"status":"healthy","model_version":"...","model_source":"registry","model_name":"sparky-ranker"}
+```
+
+If you want to inspect the full training/retraining logs:
+
+```bash
+docker compose --profile pipeline logs -f trainer batch-pipeline serving retrain-api drift-monitor
 ```
 
 ---
 
-### Step 20 — Train the model
+### Step 20 — Confirm the serving API
 
 ```bash
-make train-direct
+python3 ~/sparky-ml/scripts/smoke_test.py --url http://localhost:8000
 ```
 
-> Note: `make train-direct` uses `--rm` so the trainer container is automatically
-> deleted after it finishes. Do not run `docker logs -f sparky-trainer` — the
-> output prints directly to your terminal. Training takes 5–15 minutes.
-
-The training pipeline runs **five sequential steps** including the safeguarding
-fairness gate. Completed output looks like:
-
-```
-Step 1/5: Running data quality checks...
-  Soda data quality checks PASSED
-
-Step 2/5: Preparing training config...
-
-Step 3/5: Running training...
-  ndcg_at_10=0.8148  wall_time_seconds=42.3
-
-Step 3.5/5: Running fairness check and explainability...
-  Fairness gate PASSED: PASSED — all groups within acceptable range
-  Global explainability logged (20 features)
-  Artifacts logged to MLflow: fairness_results.json,
-    explainability/global_feature_importance.json, explainability/shap_summary.png
-
-Step 4/5: Evaluating quality gates and registering model...
-  Gate ndcg_threshold:       PASSED  (0.8148 >= 0.55)
-  Gate improvement_over_prod: PASSED  (no existing production model)
-  Gate fairness:             PASSED
-  Registered as version 1 in Staging. NDCG@10=0.8148
-
-Step 5/5: Skipping auto-promotion (manual approval required)
-```
-
-**If the fairness gate fails**, training will print:
-```
-Fairness gate FAILED: FAILED — 2 group violations + allergen_fail=False
-  Groups that failed:
-    user_vegan=1: ndcg=0.41 (min acceptable=0.65)
-    user_gluten_free=1: ndcg=0.38 (min acceptable=0.65)
-Registration result: Quality gates FAILED: ['fairness']. NDCG=0.8148
-```
-See the Troubleshooting section for how to handle this.
-
----
-
-### Step 21 — Promote model to Production
-
-`make promote` requires the retrain-api container to be running, which is not
-started yet at this point. Promote directly via the MLflow REST API instead:
-
-```bash
-curl -s -X POST http://localhost:5000/api/2.0/mlflow/model-versions/transition-stage \
-  -H "Content-Type: application/json" \
-  -d '{"name": "sparky-ranker", "version": "1", "stage": "Production", "archive_existing_versions": false}' \
-  | python3 -m json.tool
-```
-
-Expected response contains `"current_stage": "Production"`.
-
----
-
-### Step 22 — Start serving and monitoring
-
-```bash
-# Serving API (port 8000) + retrain webhook (port 8080)
-make run-serving
-
-# Prometheus + Grafana + drift monitor
-make run-monitoring
-
-# Confirm all containers are running
-make status
-```
-
-Expected output:
-```
-sparky-postgres        Up    0.0.0.0:5433->5432/tcp
-sparky-mlflow          Up    0.0.0.0:5000->5000/tcp
-sparky-serving         Up    0.0.0.0:8000->8000/tcp
-sparky-retrain-api     Up    0.0.0.0:8080->8080/tcp
-sparky-drift-monitor   Up
-sparky-prometheus      Up    0.0.0.0:9090->9090/tcp
-sparky-grafana         Up    0.0.0.0:3000->3000/tcp
-```
-
----
-
-### Step 23 — Test the ML serving API
+You can also run a manual prediction:
 
 ```bash
 curl -s -X POST http://localhost:8000/predict \
@@ -804,11 +742,9 @@ curl -s -X POST http://localhost:8000/predict \
   }' | python3 -m json.tool
 ```
 
-You should get a JSON response with a `predictions` array containing a numeric score.
-
 ---
 
-### Step 24 — Test the Explainability endpoint (Safeguarding)
+### Step 21 — Test the Explainability endpoint (Safeguarding)
 
 The `/explain` endpoint implements the **explainability** pillar of the
 safeguarding plan — it answers "why was this recipe recommended?"
@@ -857,7 +793,7 @@ Expected response:
 
 ---
 
-### Step 25 — Verify safeguarding artifacts in MLflow
+### Step 22 — Verify safeguarding artifacts in MLflow
 
 Open the MLflow UI: `http://YOUR_IP:5000`
 
@@ -873,7 +809,7 @@ Open the MLflow UI: `http://YOUR_IP:5000`
 
 ---
 
-### Step 26 — Verify drift monitoring and privacy retention
+### Step 23 — Verify drift monitoring and privacy retention
 
 The drift monitor runs continuously and also enforces the 90-day privacy
 retention policy on stored inference features.
@@ -996,6 +932,46 @@ docker network inspect sparky-ml_sparky-net | grep sparkyfitness
 
 ---
 
+## Reproducibility — Single-Command SparkyFitness Startup
+
+If someone wants to reproduce the app startup after the code has already been
+cloned, the integration files copied, and `~/SparkyFitness/docker/.env`
+configured, this is the **single Docker command** to bring up SparkyFitness:
+
+```bash
+cd ~/SparkyFitness/docker
+docker compose -f docker-compose.prod.yml -f docker-compose.sparky-build.yml --env-file .env up -d --build
+```
+
+What this one command does:
+- starts the SparkyFitness database
+- builds the backend from the locally patched source
+- builds the frontend from the locally patched source
+- launches the app stack in detached mode
+
+After that, reconnect the backend to the ML network if needed:
+
+```bash
+docker network connect sparky-ml_sparky-net sparkyfitness-server 2>/dev/null || true
+```
+
+Open the app at:
+
+```text
+http://YOUR_IP:3004
+```
+
+If you want the full ML side running too, use these commands first:
+
+```bash
+cd ~/sparky-ml
+docker compose --profile pipeline up -d
+docker compose --profile monitoring up -d prometheus alertmanager grafana postgres-exporter
+docker compose --profile data up -d data-generator
+```
+
+---
+
 ## Phase 10 — Open the App and See the Feature
 
 ### Step 30 — Open SparkyFitness in your browser
@@ -1068,7 +1044,7 @@ Replace `YOUR_IP` with your KVM floating IP.
 | SparkyFitness API | `http://YOUR_IP:3010` | — |
 | ML Serving API health | `http://YOUR_IP:8000/health` | — |
 | ML Serving API docs (interactive) | `http://YOUR_IP:8000/docs` | — |
-| **Explainability endpoint** | `http://YOUR_IP:8000/explain` | POST, see Step 24 |
+| **Explainability endpoint** | `http://YOUR_IP:8000/explain` | POST, see Step 21 |
 | MLflow model registry + safeguarding artifacts | `http://YOUR_IP:5000` | — |
 | Grafana dashboards | `http://YOUR_IP:3000` | admin / sparky_admin |
 | Prometheus metrics | `http://YOUR_IP:9090` | — |
@@ -1083,7 +1059,9 @@ If the instance reboots (but is not deleted):
 ```bash
 # ML system
 cd ~/sparky-ml
-make run-infra && make run-serving && make run-monitoring
+docker compose --profile pipeline up -d
+docker compose --profile monitoring up -d prometheus alertmanager grafana postgres-exporter
+docker compose --profile data up -d data-generator
 
 # SparkyFitness
 cd ~/SparkyFitness/docker
@@ -1188,19 +1166,12 @@ for f in ["RAW_recipes.csv", "RAW_interactions.csv"]:
 conn.close()
 EOF
 
-# 4. ML system — build, run data pipeline, train, serve
+# 4. ML system — build and start the integrated pipeline
 cd ~/sparky-ml
 make build
-make run-infra
-make data          # feature engineering + Soda quality checks on the downloaded CSVs
-make train-direct  # trains + fairness gate + explainability + quality gates + registers
-# Promote via MLflow REST API (retrain-api not running yet at this point)
-curl -s -X POST http://localhost:5000/api/2.0/mlflow/model-versions/transition-stage \
-  -H "Content-Type: application/json" \
-  -d '{"name": "sparky-ranker", "version": "1", "stage": "Production", "archive_existing_versions": false}' \
-  | python3 -m json.tool
-make run-serving
-make run-monitoring
+docker compose --profile pipeline up -d
+docker compose --profile monitoring up -d prometheus alertmanager grafana postgres-exporter
+docker compose --profile data up -d data-generator
 
 # 5. SparkyFitness
 cd ~/SparkyFitness/docker
@@ -1253,7 +1224,7 @@ docker logs sparkyfitness-server --tail 50 | grep -i recommend
 
 ### Fairness gate fails — model not registered
 
-Symptom: `make train-direct` prints `Quality gates FAILED: ['fairness']`
+Symptom: the trainer reports `Quality gates FAILED: ['fairness']`
 and the model is not registered to MLflow.
 
 This means one or more dietary groups (e.g. vegan, gluten-free users) have
@@ -1282,7 +1253,8 @@ from safeguarding.fairness_checker import run_fairness_check
 print('Fairness threshold relaxed for debugging')
 "
 # Then retrain:
-make train-direct
+docker compose --profile retrain run --rm trainer \
+  python -m src.training.retrain_pipeline --config configs/training/xgb_ranker.yaml
 ```
 
 **Option 2 — Check if the group has too few users (<50):**
@@ -1324,7 +1296,7 @@ docker exec sparky-postgres psql -U sparky -d sparky \
 docker logs sparky-serving --tail 30 | grep -i "feature logging"
 ```
 
-### Swift download fails during `make data`
+### Swift download fails during raw-data setup
 
 ```bash
 # Check credentials in .env
@@ -1351,12 +1323,13 @@ mv recipes.csv RAW_recipes.csv 2>/dev/null || true
 mv interactions.csv RAW_interactions.csv 2>/dev/null || true
 ```
 
-### `make train-direct` fails — NDCG below threshold
+### Training fails — NDCG below threshold
 
 ```bash
 # Lower threshold temporarily for testing
 echo "NDCG_THRESHOLD=0.0" >> ~/sparky-ml/.env
-make train-direct
+docker compose --profile retrain run --rm trainer \
+  python -m src.training.retrain_pipeline --config configs/training/xgb_ranker.yaml
 # Remove the override once real training succeeds
 ```
 
