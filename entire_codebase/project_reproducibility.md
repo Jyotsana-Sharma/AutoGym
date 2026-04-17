@@ -189,51 +189,38 @@ Everything needed is already in this repo:
 - `scripts/setup-sparkyfitness.sh` — applies all patches automatically
 - `.env.sparky.example` — all environment variables with safe defaults
 
-### Three commands to run everything
+### Two commands to run everything
 
-**Step B1 — Add SparkyFitness as a submodule** (once, after first clone):
+**Step B1 — Initialise the submodule** (once, after first clone):
 
 ```bash
-git submodule add https://github.com/CodeWithCJ/SparkyFitness.git SparkyFitness
 git submodule update --init --recursive
 ```
 
-> If you already cloned with `--recurse-submodules`, skip this.
+> If you cloned with `--recurse-submodules` this is already done — skip it.
 
-**Step B2 — Run the setup script** (once, applies all integration patches):
-
-```bash
-bash scripts/setup-sparkyfitness.sh
-```
-
-This script:
-- Copies all ML recommendation files into the SparkyFitness submodule
-- Patches `SparkyFitnessServer.ts` to register the recommendation route
-- Creates `SparkyFitness/.env` from `.env.sparky.example`
-
-**Step B3 — Start everything with one command**:
+**Step B2 — Start everything**:
 
 ```bash
 docker compose --profile pipeline up -d
 ```
 
-This starts 14 containers in the correct order (batch-pipeline and trainer run once and exit; 12 stay running at steady state):
+The `sparkyfitness-setup` container runs automatically first — no manual script needed. It copies all integration patch files into the SparkyFitness source, patches `SparkyFitnessServer.ts` to register the recommendation route, and creates `SparkyFitness/.env`. Only after it exits successfully do `sparkyfitness-server` and `sparkyfitness-frontend` start.
+
+This starts 14 containers in the correct order (batch-pipeline, trainer, and sparkyfitness-setup run once and exit; 12 stay running at steady state):
 
 ```
 postgres + mlflow
       ↓
-batch-pipeline (compile training data)
-      ↓  exits 0
-trainer (XGBoost + fairness gate + MLflow registration)
-      ↓  exits 0
-sparky-serving  ←─────────────────────────┐
-retrain-api                               │ sparky-net (shared network)
-drift-monitor                             │
-prometheus + grafana + alertmanager       │
-      +                                   │
-sparkyfitness-db                          │
-sparkyfitness-server ─────────────────────┘  ML_RECOMMENDATION_URL=http://sparky-serving:8000
-sparkyfitness-frontend (port 3004)
+batch-pipeline (compile training data)        sparkyfitness-setup (copy patches, create .env)
+      ↓  exits 0                                      ↓  exits 0
+trainer (XGBoost + fairness gate + MLflow)    sparkyfitness-db (healthy)
+      ↓  exits 0                                      ↓
+sparky-serving  ←─────────────────────────┐  sparkyfitness-server ──────────────────────┘
+retrain-api                               │  sparkyfitness-frontend (port 3004)
+drift-monitor                             │  ML_RECOMMENDATION_URL=http://sparky-serving:8000
+prometheus + grafana + alertmanager       │  (both on sparky-net — talk by container name)
+          └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Verify
