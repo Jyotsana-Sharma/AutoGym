@@ -66,7 +66,8 @@ services:
   mlflow:
     build:
       context: .
-      dockerfile: docker/Dockerfile.mlflow
+      dockerfile: Dockerfile
+      target: mlflow
     container_name: sparky-mlflow
     restart: unless-stopped
     networks: [sparky-net]
@@ -89,7 +90,8 @@ services:
   data-generator:
     build:
       context: .
-      dockerfile: docker/Dockerfile.data
+      dockerfile: Dockerfile
+      target: data
     container_name: sparky-data-generator
     networks: [sparky-net]
     profiles: ["data", "full"]
@@ -108,7 +110,8 @@ services:
   batch-pipeline:
     build:
       context: .
-      dockerfile: docker/Dockerfile.data
+      dockerfile: Dockerfile
+      target: data
     container_name: sparky-batch-pipeline
     networks: [sparky-net]
     profiles: ["data", "retrain", "full"]
@@ -133,7 +136,8 @@ services:
   drift-monitor:
     build:
       context: .
-      dockerfile: docker/Dockerfile.data
+      dockerfile: Dockerfile
+      target: data
     container_name: sparky-drift-monitor
     networks: [sparky-net]
     profiles: ["monitoring", "full"]
@@ -159,7 +163,8 @@ services:
   trainer:
     build:
       context: .
-      dockerfile: docker/Dockerfile.training
+      dockerfile: Dockerfile
+      target: training
     container_name: sparky-trainer
     networks: [sparky-net]
     profiles: ["retrain", "full"]
@@ -184,7 +189,8 @@ services:
   retrain-api:
     build:
       context: .
-      dockerfile: docker/Dockerfile.training
+      dockerfile: Dockerfile
+      target: training
     container_name: sparky-retrain-api
     networks: [sparky-net]
     profiles: ["monitoring", "full"]
@@ -215,7 +221,8 @@ services:
   serving:
     build:
       context: .
-      dockerfile: docker/Dockerfile.serving
+      dockerfile: Dockerfile
+      target: serving
     container_name: sparky-serving
     networks: [sparky-net]
     profiles: ["serving", "full"]
