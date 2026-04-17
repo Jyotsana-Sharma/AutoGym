@@ -323,7 +323,7 @@ def trigger_retraining(reason: str) -> bool:
     """Send a retraining trigger webhook to the retrain-api service."""
     payload = {
         "reason": reason,
-        "config": "configs/train/xgb_ranker.yaml",
+        "config": "configs/training/xgb_ranker.yaml",
         "auto_promote": False,  # require manual approval
     }
     try:

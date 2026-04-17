@@ -21,9 +21,9 @@ KVM@TACC Virtual Machine  (everything runs here)
   ├── ML System  ~/sparky-ml/
   │   ├── sparky-postgres      :5433   ML training database
   │   ├── sparky-mlflow        :5000   Model registry + experiment tracking
-  │   ├── sparky-serving       :8000   XGBoost ranking API  ← SparkyFitness calls this
+  │   ├── sparky-serving       :8000   XGBoost ranking API + /explain endpoint
   │   ├── sparky-retrain-api   :8080   Retraining webhook
-  │   ├── sparky-drift-monitor         KS-test drift detection
+  │   ├── sparky-drift-monitor         KS-test drift + 90-day privacy cleanup
   │   ├── sparky-prometheus    :9090   Metrics collection
   │   └── sparky-grafana       :3000   Monitoring dashboards
   │
@@ -124,7 +124,7 @@ On KVM@TACC, Security Groups are under **Network → Security Groups**.
 | 3004 | TCP | Ingress | SparkyFitness UI |
 | 3010 | TCP | Ingress | SparkyFitness API |
 | 5000 | TCP | Ingress | MLflow UI |
-| 8000 | TCP | Ingress | ML Serving API |
+| 8000 | TCP | Ingress | ML Serving API + /explain |
 | 8080 | TCP | Ingress | Retrain webhook |
 | 3000 | TCP | Ingress | Grafana |
 | 9090 | TCP | Ingress | Prometheus |
@@ -291,7 +291,7 @@ ln -s ~/AutoGym/entire_codebase ~/sparky-ml
 ls -la ~ | grep sparky-ml
 # Expected:  lrwxrwxrwx ... sparky-ml -> /home/cc/AutoGym/entire_codebase
 ls ~/sparky-ml
-# Should show: Makefile  configs  docker  src  requirements  docker-compose.yml ...
+# Should show: Dockerfile  Makefile  configs  docker  src  requirements  docker-compose.yml ...
 ```
 
 > If the repo is private, use a Personal Access Token:
@@ -513,6 +513,12 @@ MLFLOW_TRACKING_URI=http://YOUR_IP:5000
 # ── Serving ───────────────────────────────────────────────────────────────
 LOG_PREDICTIONS=true
 MODEL_POLL_INTERVAL_SEC=60
+
+# ── Safeguarding — quality gate thresholds ────────────────────────────────
+NDCG_THRESHOLD=0.55          # minimum NDCG@10 for model registration
+IMPROVEMENT_THRESHOLD=0.01   # new model must not regress > 1% vs. production
+DRIFT_THRESHOLD=0.05         # KS-test p-value below which drift is detected
+CHECK_INTERVAL_SECONDS=300   # drift monitor polling interval (seconds)
 ```
 
 Save with `Ctrl+O`, exit with `Ctrl+X`.
@@ -585,14 +591,26 @@ Save with `Ctrl+O`, exit with `Ctrl+X`.
 
 ### Step 16 — Build all Docker images
 
+The ML system uses a **single multi-stage `Dockerfile`** (in the repo root).
+One file, four named stages — `data`, `training`, `serving`, `mlflow`.
+Docker-compose selects the right stage per service via `target:`.
+Each stage gets only its own dependencies, so image sizes stay small.
+The `safeguarding/` module (fairness checker + explainability) is in the shared
+base stage and is automatically available to both training and serving images.
+
 ```bash
 cd ~/sparky-ml
 
-# Builds all images — takes 5–10 minutes on first run
+# Builds all four stage images — takes 5–10 minutes on first run
 make build
 ```
 
 Wait until the build completes before moving on.
+
+To build a single stage manually (e.g. if only serving changed):
+```bash
+docker build --target serving -t sparky-serving:local .
+```
 
 ---
 
@@ -649,10 +667,17 @@ make data
 # The pipeline:
 #   1. Downloads RAW_recipes.csv + RAW_interactions.csv from CHI@TACC Swift
 #   2. Runs feature engineering (build_training_table.py)
-#   3. Writes train/val/test splits to the Docker training-data volume
-#   4. Uploads versioned splits back to proj04-sparky-training-data in Swift
+#   3. Runs Soda data quality checks (11 checks on enriched_recipes,
+#      4 checks on each of train/val/test) — pipeline aborts if any fail
+#   4. Writes train/val/test splits to the Docker training-data volume
+#   5. Uploads versioned splits back to proj04-sparky-training-data in Swift
 #
 # Takes 3–8 minutes. Completed output looks like:
+# SODA QUALITY REPORT
+#   Total checks:  23
+#   Passed:        23
+#   Failed:        0
+#   Result: PASS ✓
 # DONE: Batch Pipeline Complete
 # Train: ~80,000 rows  Val: ~10,000 rows  Test: ~10,000 rows
 ```
@@ -669,11 +694,42 @@ make train-direct
 > deleted after it finishes. Do not run `docker logs -f sparky-trainer` — the
 > output prints directly to your terminal. Training takes 5–15 minutes.
 
-Completed output looks like:
+The training pipeline runs **five sequential steps** including the safeguarding
+fairness gate. Completed output looks like:
+
 ```
-ndcg_at_10=0.8148  ✓ passes threshold 0.55
-Registered as version 1 in Staging. NDCG@10=0.8148
+Step 1/5: Running data quality checks...
+  Soda data quality checks PASSED
+
+Step 2/5: Preparing training config...
+
+Step 3/5: Running training...
+  ndcg_at_10=0.8148  wall_time_seconds=42.3
+
+Step 3.5/5: Running fairness check and explainability...
+  Fairness gate PASSED: PASSED — all groups within acceptable range
+  Global explainability logged (20 features)
+  Artifacts logged to MLflow: fairness_results.json,
+    explainability/global_feature_importance.json, explainability/shap_summary.png
+
+Step 4/5: Evaluating quality gates and registering model...
+  Gate ndcg_threshold:       PASSED  (0.8148 >= 0.55)
+  Gate improvement_over_prod: PASSED  (no existing production model)
+  Gate fairness:             PASSED
+  Registered as version 1 in Staging. NDCG@10=0.8148
+
+Step 5/5: Skipping auto-promotion (manual approval required)
 ```
+
+**If the fairness gate fails**, training will print:
+```
+Fairness gate FAILED: FAILED — 2 group violations + allergen_fail=False
+  Groups that failed:
+    user_vegan=1: ndcg=0.41 (min acceptable=0.65)
+    user_gluten_free=1: ndcg=0.38 (min acceptable=0.65)
+Registration result: Quality gates FAILED: ['fairness']. NDCG=0.8148
+```
+See the Troubleshooting section for how to handle this.
 
 ---
 
@@ -752,9 +808,116 @@ You should get a JSON response with a `predictions` array containing a numeric s
 
 ---
 
+### Step 24 — Test the Explainability endpoint (Safeguarding)
+
+The `/explain` endpoint implements the **explainability** pillar of the
+safeguarding plan — it answers "why was this recipe recommended?"
+using SHAP TreeExplainer values.
+
+```bash
+curl -s -X POST http://localhost:8000/explain \
+  -H "Content-Type: application/json" \
+  -d '{
+    "instance": {
+      "user_id": "1", "recipe_id": "100",
+      "rating": 4.2,
+      "minutes": 30, "n_ingredients": 8, "n_steps": 5,
+      "avg_rating": 4.2, "n_reviews": 150, "cuisine": "italian",
+      "calories": 45.0, "total_fat": 10.0, "sugar": 5.0,
+      "sodium": 8.0, "protein": 20.0, "saturated_fat": 4.0, "carbohydrate": 15.0,
+      "total_fat_g": 7.8, "sugar_g": 2.5, "sodium_g": 0.18,
+      "protein_g": 10.0, "saturated_fat_g": 3.1, "carbohydrate_g": 41.25,
+      "has_egg": 0, "has_fish": 0, "has_milk": 1, "has_nuts": 0,
+      "has_peanut": 0, "has_sesame": 0, "has_shellfish": 0, "has_soy": 0, "has_wheat": 1,
+      "daily_calorie_target": 2000, "protein_target_g": 150,
+      "carbs_target_g": 200, "fat_target_g": 65,
+      "user_vegetarian": 0, "user_vegan": 0, "user_gluten_free": 0,
+      "user_dairy_free": 0, "user_low_sodium": 0, "user_low_fat": 0,
+      "history_pc1": 0.1, "history_pc2": -0.3, "history_pc3": 0.5,
+      "history_pc4": 0.0, "history_pc5": 0.2, "history_pc6": -0.1
+    },
+    "top_k": 5
+  }' | python3 -m json.tool
+```
+
+Expected response:
+```json
+{
+  "explanation": "This recipe was recommended because: your protein target, Average community rating, Cooking time (min) match your preferences.",
+  "top_contributing_features": [
+    {"feature": "protein_target_g", "display_name": "Your protein target",
+     "value": 150.0, "shap_contribution": 0.1823, "direction": "positive"},
+    {"feature": "avg_rating", "display_name": "Average community rating",
+     "value": 4.2, "shap_contribution": 0.1204, "direction": "positive"},
+    ...
+  ],
+  "method": "SHAP TreeExplainer"
+}
+```
+
+---
+
+### Step 25 — Verify safeguarding artifacts in MLflow
+
+Open the MLflow UI: `http://YOUR_IP:5000`
+
+1. Click the experiment → click the training run
+2. Under **Artifacts**, you should see:
+   - `fairness_results.json` — per-group NDCG + allergen safety results
+   - `explainability/global_feature_importance.json` — SHAP mean |SHAP| per feature
+   - `explainability/shap_summary.png` — feature importance bar chart
+   - `quality_gate_results.json` — all three gate pass/fail with values
+3. Under **Tags**, you should see:
+   - `fairness_passed = True`
+   - `quality_gate_status = PASSED`
+
+---
+
+### Step 26 — Verify drift monitoring and privacy retention
+
+The drift monitor runs continuously and also enforces the 90-day privacy
+retention policy on stored inference features.
+
+```bash
+# Run a one-off drift check to confirm it's working
+docker exec sparky-drift-monitor \
+  python src/data/drift_monitor.py --once 2>/dev/null | python3 -m json.tool
+
+# Check the monitor loop is running
+docker logs sparky-drift-monitor --tail 20
+```
+
+Expected output from `--once`:
+```json
+{
+  "run_at": "2026-04-16T...",
+  "checks": {
+    "ingestion_quality": {"passed": true},
+    "training_set_quality": {"passed": true},
+    "inference_drift": {
+      "skipped": true,
+      "reason": "insufficient live samples: 0 < 100"
+    }
+  },
+  "actions_taken": []
+}
+```
+
+> Drift monitoring requires ≥100 live inference feature rows in the database
+> before it runs the KS-test. These accumulate automatically as users receive
+> recommendations. After the app has served ~100 requests, re-run `--once`
+> and you will see per-feature KS statistics.
+
+The privacy retention log line appears when there are rows to clean up:
+```
+Privacy retention: deleted 0 inference_features rows older than 90 days
+```
+
+---
+
 ## Phase 9 — Start SparkyFitness
 
-### Step 24 — Create the build override file
+### Step 27 — Create the build override file
 
 The upstream `docker-compose.prod.yml` pulls pre-built Docker Hub images that do
 not contain the recommendation feature. This override file swaps in local builds
@@ -782,7 +945,7 @@ EOF
 
 ---
 
-### Step 25 — Build and start SparkyFitness
+### Step 28 — Build and start SparkyFitness
 
 ```bash
 cd ~/SparkyFitness/docker
@@ -817,7 +980,7 @@ docker logs sparkyfitness-server --tail 30
 
 ---
 
-### Step 26 — Connect SparkyFitness to the ML network
+### Step 29 — Connect SparkyFitness to the ML network
 
 The SparkyFitness backend needs to reach the ML serving container.
 Run this once after every fresh deploy:
@@ -835,7 +998,7 @@ docker network inspect sparky-ml_sparky-net | grep sparkyfitness
 
 ## Phase 10 — Open the App and See the Feature
 
-### Step 27 — Open SparkyFitness in your browser
+### Step 30 — Open SparkyFitness in your browser
 
 On your laptop:
 
@@ -845,7 +1008,7 @@ http://YOUR_IP:3004
 
 ---
 
-### Step 28 — Set up your account and goals
+### Step 31 — Set up your account and goals
 
 1. Click **Sign Up** and create an account
 2. Complete onboarding — set your **daily nutrition goals** (Calories, Protein, Carbs, Fat targets)
@@ -854,7 +1017,7 @@ http://YOUR_IP:3004
 
 ---
 
-### Step 29 — Add meal templates
+### Step 32 — Add meal templates
 
 The recommendation system ranks meals that exist in SparkyFitness's meal library.
 
@@ -865,7 +1028,7 @@ The recommendation system ranks meals that exist in SparkyFitness's meal library
 
 ---
 
-### Step 30 — See the recommendations
+### Step 33 — See the recommendations
 
 1. Go to **Foods** in the left sidebar
 2. The **"Recommended for You"** panel appears at the top of the page
@@ -878,7 +1041,7 @@ The recommendation system ranks meals that exist in SparkyFitness's meal library
 
 ---
 
-### Step 31 — Confirm ML is being called
+### Step 34 — Confirm ML is being called
 
 ```bash
 # Watch the serving logs while loading the Foods page
@@ -889,6 +1052,9 @@ When you open the Foods page you should see:
 ```
 POST /predict  200 OK  batch_size=12  latency=45ms  model_version=1
 ```
+
+Every `/predict` call also writes raw feature values to the `inference_features`
+PostgreSQL table, which the drift monitor reads to detect distribution shift.
 
 ---
 
@@ -901,8 +1067,9 @@ Replace `YOUR_IP` with your KVM floating IP.
 | **SparkyFitness UI** — recommendation feature here | `http://YOUR_IP:3004` | your account |
 | SparkyFitness API | `http://YOUR_IP:3010` | — |
 | ML Serving API health | `http://YOUR_IP:8000/health` | — |
-| ML Serving API docs | `http://YOUR_IP:8000/docs` | — |
-| MLflow model registry | `http://YOUR_IP:5000` | — |
+| ML Serving API docs (interactive) | `http://YOUR_IP:8000/docs` | — |
+| **Explainability endpoint** | `http://YOUR_IP:8000/explain` | POST, see Step 24 |
+| MLflow model registry + safeguarding artifacts | `http://YOUR_IP:5000` | — |
 | Grafana dashboards | `http://YOUR_IP:3000` | admin / sparky_admin |
 | Prometheus metrics | `http://YOUR_IP:9090` | — |
 | Retrain webhook status | `http://YOUR_IP:8080/status` | — |
@@ -943,7 +1110,7 @@ When a KVM lease expires the VM is deleted but **CHI@TACC Swift data is never de
 - Docker + Node install (Steps 8–10)
 - Clone ML code + SparkyFitness + apply integration (Steps 11–12)
 - Both `.env` files with the **new floating IP** (Steps 14–15)
-- Full deployment (Steps 16–31)
+- Full deployment (Steps 16–34)
 
 ```bash
 # Quick redeploy after new instance is up
@@ -1025,8 +1192,8 @@ EOF
 cd ~/sparky-ml
 make build
 make run-infra
-make data          # feature engineering on the downloaded CSVs
-make train-direct
+make data          # feature engineering + Soda quality checks on the downloaded CSVs
+make train-direct  # trains + fairness gate + explainability + quality gates + registers
 # Promote via MLflow REST API (retrain-api not running yet at this point)
 curl -s -X POST http://localhost:5000/api/2.0/mlflow/model-versions/transition-stage \
   -H "Content-Type: application/json" \
@@ -1035,14 +1202,14 @@ curl -s -X POST http://localhost:5000/api/2.0/mlflow/model-versions/transition-s
 make run-serving
 make run-monitoring
 
-# 4. SparkyFitness
+# 5. SparkyFitness
 cd ~/SparkyFitness/docker
 docker compose -f docker-compose.prod.yml -f docker-compose.sparky-build.yml --env-file .env up -d --build
 
-# 5. Connect networks
+# 6. Connect networks
 docker network connect sparky-ml_sparky-net sparkyfitness-server
 
-# 6. Open browser at http://NEW_IP:3004
+# 7. Open browser at http://NEW_IP:3004
 ```
 
 ---
@@ -1052,14 +1219,14 @@ docker network connect sparky-ml_sparky-net sparkyfitness-server
 ```bash
 cd ~/sparky-ml
 
-make train            # trigger async retraining via webhook API
+make train            # trigger async retraining via webhook API (runs all 5 steps incl. fairness)
 make retrain-status   # check if a retraining job is running
 make promote          # promote latest Staging model to Production
 make rollback         # roll back to previous Production model
 make logs-serving     # live serving logs
-make smoke-test       # health check + sample prediction
-make fairness         # run per-group NDCG fairness check
-make drift-check      # run one-off KS drift check
+make smoke-test       # health check + sample /predict call
+make fairness         # run per-group NDCG fairness check manually on current test set
+make drift-check      # run one-off KS drift check (does not trigger retraining)
 make stop             # stop all ML containers
 make clean            # destroy all containers and volumes (destructive)
 ```
@@ -1082,6 +1249,79 @@ docker network connect sparky-ml_sparky-net sparkyfitness-server
 
 # 4. Check SparkyFitness server logs for ML call errors
 docker logs sparkyfitness-server --tail 50 | grep -i recommend
+```
+
+### Fairness gate fails — model not registered
+
+Symptom: `make train-direct` prints `Quality gates FAILED: ['fairness']`
+and the model is not registered to MLflow.
+
+This means one or more dietary groups (e.g. vegan, gluten-free users) have
+NDCG@10 more than 20% below the overall, or allergen violations exceed 1%.
+
+```bash
+# Inspect the full fairness report from the MLflow run
+# First find the run ID from the training output, then:
+curl -s http://localhost:5000/api/2.0/mlflow/artifacts/list \
+  --data-urlencode "run_id=YOUR_RUN_ID" \
+  --data-urlencode "path=fairness_results.json" | python3 -m json.tool
+
+# Or view it directly in the MLflow UI:
+# http://YOUR_IP:5000 → experiment → run → Artifacts → fairness_results.json
+```
+
+**Option 1 — Temporarily lower the threshold for testing:**
+```bash
+# The fairness check is in safeguarding/fairness_checker.py
+# MAX_DEGRADATION=0.20 means a group can be at most 20% worse than overall
+# Raise this to 0.40 temporarily to see if the model at least trains:
+docker exec sparky-trainer \
+  python -c "
+import os; os.environ['MAX_DEGRADATION']='0.40'
+from safeguarding.fairness_checker import run_fairness_check
+print('Fairness threshold relaxed for debugging')
+"
+# Then retrain:
+make train-direct
+```
+
+**Option 2 — Check if the group has too few users (<50):**
+Groups with fewer than 50 users are automatically skipped (insufficient
+statistical power). If the failing group is small, it should be skipped.
+Check `n_users` in the fairness report.
+
+**Option 3 — Check if allergen safety is the failure:**
+```bash
+# In fairness_results.json, look at allergen_safety.violations
+# A violation means dairy-free users are getting milk-containing recipes, etc.
+# This indicates a bug in the feature vector allergen flags.
+grep "allergen_safety" ~/sparky-ml/output/fairness_results.json
+```
+
+### `/explain` endpoint returns 503
+
+```bash
+# Check if SHAP is installed in the serving image
+docker exec sparky-serving pip show shap
+
+# If not installed, add shap to requirements/serving.txt and rebuild:
+echo "shap>=0.45.0" >> ~/sparky-ml/requirements/serving.txt
+docker build --target serving -t sparky-serving-local . -f ~/sparky-ml/Dockerfile
+# Then restart with the new image
+```
+
+### Drift monitor shows "insufficient live samples"
+
+The KS-test requires ≥100 inference feature rows. These are written automatically
+by the serving API on each `/predict` call. If the count is low:
+
+```bash
+# Check how many rows are in the inference_features table
+docker exec sparky-postgres psql -U sparky -d sparky \
+  -c "SELECT COUNT(*), MAX(captured_at) FROM inference_features;"
+
+# If the table is empty, verify log_features is being called:
+docker logs sparky-serving --tail 30 | grep -i "feature logging"
 ```
 
 ### Swift download fails during `make data`
@@ -1225,6 +1465,13 @@ To enable automated weekly retraining, add these secrets in
 | `OS_APPLICATION_CREDENTIAL_ID` | from Step 2 |
 | `OS_APPLICATION_CREDENTIAL_SECRET` | from Step 2 |
 
-The pipeline at `.github/workflows/retrain.yml` runs every Sunday at 2 AM UTC,
-runs quality + fairness gates, auto-promotes if NDCG ≥ 0.55, and
-auto-rolls back if the smoke test fails.
+The pipeline at `.github/workflows/retrain.yml` runs every Sunday at 2 AM UTC
+and executes 4 stages:
+
+1. **Data quality gate** — Soda checks on train/val/test CSVs + drift report
+2. **Train + fairness gate + explainability + register** — full 5-step pipeline;
+   logs `fairness_results.json` and SHAP artifacts to MLflow; only registers if
+   NDCG ≥ 0.55, no regression vs. production, and fairness passes
+3. **Auto-promote** — promotes Staging → Production + hot-reloads serving
+4. **Auto-rollback** — if smoke test fails after promotion, rolls back to the
+   previous Production version automatically

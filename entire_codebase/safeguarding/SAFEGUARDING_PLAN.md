@@ -203,7 +203,7 @@ or adversarial inputs.
 | Fairness        | Group NDCG@10 gate, allergen safety | `safeguarding/fairness_checker.py` | Yes (post-training) |
 | Explainability  | SHAP per-request + global importance | `safeguarding/explainability.py` | Yes |
 | Transparency    | Model version in response, MLflow lineage | `app_production.py`, MLflow | Yes |
-| Privacy         | Pseudonymized IDs, no PII in models, 90-day retention | DB schema, pipeline design | Partial (retention needs cron) |
+| Privacy         | Pseudonymized IDs, no PII in models, 90-day retention | DB schema, drift monitor cleanup | Yes |
 | Accountability  | Retraining log, approval gates, rollback trail | `retraining_log`, GitHub Environments | Yes |
 | Robustness      | Drift monitoring, auto-rollback, fallback model | `drift_monitor.py`, alerts, `model_loader.py` | Yes |
 
@@ -211,8 +211,7 @@ or adversarial inputs.
 
 ## Known Gaps and Next Steps
 
-1. **Retention cron job**: Implement `DELETE FROM inference_features WHERE captured_at < NOW() - INTERVAL '90 days'` as a PostgreSQL scheduled job or Airflow task.
-2. **Differential privacy**: For larger user bases, consider DP-SGD or RAPPOR for user feature aggregation.
-3. **Counterfactual explanations**: Supplement SHAP with "if you liked more Italian food, these recipes would rank higher" style explanations.
-4. **Adversarial robustness**: Add input perturbation testing to catch unusually large feature values that could manipulate rankings.
-5. **External audit**: Document model card and submit to team lead review before production launch.
+1. **Differential privacy**: For larger user bases, consider DP-SGD or RAPPOR for user feature aggregation.
+2. **Counterfactual explanations**: Supplement SHAP with "if you liked more Italian food, these recipes would rank higher" style explanations.
+3. **Adversarial robustness**: Add input perturbation testing to catch unusually large feature values that could manipulate rankings.
+4. **External audit**: Document model card and submit to team lead review before production launch.

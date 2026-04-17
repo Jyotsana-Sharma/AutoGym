@@ -1,5 +1,10 @@
 # Project Proposal: SparkyFitness — Personalized Recipe Recommendation System
 
+> Note: this top-level README is the original proposal-style document.
+> The current integrated implementation, deployment, and milestone runbooks live under
+> `entire_codebase/`, especially `entire_codebase/README.md` and
+> `entire_codebase/MILESTONE_DELIVERABLES.md`.
+
 ---
 
 ## Table of Contents
@@ -388,7 +393,7 @@ All features encoded as `float32`. String/categorical columns → sorted-unique 
 #### 5.2.3 Hyperparameter Configuration (YAML-driven)
 
 ```yaml
-# configs/train/xgb_ranker.yaml
+# configs/training/xgb_ranker.yaml
 run_name:        xgb_ranker_v1
 experiment_name: autogym-recipe-ranking
 data:
@@ -911,5 +916,3 @@ model artifact
 - [ ] Safeguarding plan: the team must deliver a safeguarding plan and implement it within the system. This plan should take active steps with concrete mechanisms to support fairness, explainability, transparency, privacy, accountability, and robustness principles (as discussed in lecture).
 
 ---
-
-

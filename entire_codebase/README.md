@@ -150,6 +150,29 @@ make run-monitoring
 make run-all
 ```
 
+## Demo Bring-Up For This 3-Person Team
+
+This repo is organized for a **three-person team** (`data`, `training`, `serving`) using
+**Docker Compose**, not Kubernetes. The shortest end-to-end demo flow is:
+
+```bash
+cd entire_codebase
+docker compose --profile pipeline up -d
+docker compose --profile data up -d data-generator
+python scripts/smoke_test.py --url http://localhost:8000
+```
+
+What this brings up:
+- `batch-pipeline` compiles `train.csv`, `val.csv`, `test.csv`, and `manifest.json`
+- `trainer` retrains and registers a candidate model in MLflow
+- `serving` loads the current Production model and exposes `/predict`, `/feedback`, and `/explain`
+- `drift-monitor` evaluates ingestion quality, training-set quality, live inference drift, and privacy retention
+- `data-generator` replays held-out rows as **production-like traffic** by calling the live `/predict` and `/feedback` endpoints
+
+If you want to show the open-source app integration, run SparkyFitness separately and point it at
+`ML_RECOMMENDATION_URL=http://sparky-serving:8000` as described in
+[sparkyfitness-integration/INTEGRATION_GUIDE.md](sparkyfitness-integration/INTEGRATION_GUIDE.md).
+
 ---
 
 ## End-to-End Data Flow
@@ -180,6 +203,36 @@ make run-all
                drift_monitor.py: KS test every 5 min → POST /trigger on drift
                Prometheus alerts on degradation → auto-rollback
 ```
+
+## Milestone Walkthrough
+
+For the milestone demo, these are the most important things to show clearly:
+
+1. **Bringing up the system**
+   Run `docker compose --profile pipeline up -d` and then `docker compose --profile data up -d data-generator`.
+2. **Production data script**
+   `src/data/data_generator.py` now hits the real serving endpoints:
+   `POST /predict` to emulate production inference traffic and `POST /feedback` to capture outcomes.
+3. **ML feature inside the open-source service**
+   SparkyFitness calls the serving layer through the recommendation backend/frontend files in
+   `sparkyfitness-integration/`; the recommendation panel is part of the regular Foods-page flow.
+4. **Feedback capture**
+   Serving writes ranked outputs to `prediction_log`, explicit outcomes to `user_feedback`, and live features to
+   `inference_features`. The SparkyFitness integration also records user actions in
+   `recommendation_interactions`.
+5. **Production data saved for retraining**
+   `user_feedback` and `user_interactions` become the live signal source for retraining, and `batch_pipeline.py`
+   merges those records back into the next training package.
+6. **Retraining and redeployment**
+   `retrain_api.py` triggers `retrain_pipeline.py`; passing models are registered to MLflow Staging, promoted, and
+   then hot-reloaded by `app_production.py` without restarting the serving container.
+7. **Safeguarding**
+   The safeguarding implementation is in `safeguarding/SAFEGUARDING_PLAN.md` and enforced by fairness gates,
+   explainability artifacts, privacy retention cleanup, monitoring, and rollback logic.
+8. **Role-owned evaluation and monitoring**
+   Data: ingestion checks, training-set checks, and drift monitoring.
+   Training: NDCG-based quality gates and fairness gate before registration.
+   Serving: latency/error/score monitoring, model-version visibility, hot-reload, and rollback.
 
 ---
 

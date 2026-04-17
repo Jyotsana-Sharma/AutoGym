@@ -5,6 +5,103 @@
 **Repository:** `entire_codebase/` (ML system) + `SparkyFitness/` (integrated app)  
 **Date:** April 2026
 
+## Scope Clarification
+
+This milestone submission is written for a **3-person team**:
+- **Data**
+- **Training**
+- **Serving**
+
+Accordingly, the integrated system is packaged with **Docker Compose** rather than Kubernetes.
+The core repository is `entire_codebase/`, and the open-source service integration is provided in
+`sparkyfitness-integration/` for the SparkyFitness application.
+
+## Demo Checklist
+
+These are the specific items to call out during the demo because they map directly to the milestone prompt.
+
+### Bringing up the system
+
+```bash
+cd entire_codebase
+docker compose --profile pipeline up -d
+docker compose --profile data up -d data-generator
+python scripts/smoke_test.py --url http://localhost:8000
+```
+
+This sequence brings up:
+- data preparation and batch compilation
+- model retraining and registration
+- serving and monitoring
+- the production-traffic replay script
+
+### "Production data" script that hits service endpoints
+
+`src/data/data_generator.py` is the production-emulation script. It replays held-out rows as live traffic by:
+- building multi-candidate `POST /predict` requests against the serving API
+- sending observed outcomes back through `POST /feedback`
+- writing a local audit CSV in `output/generated_interactions.csv`
+
+This demonstrates that production traffic flows through the same interfaces used by the deployed model service.
+
+### Using the ML feature within the open-source service
+
+The ML recommendation feature is implemented for SparkyFitness in:
+- `sparkyfitness-integration/SparkyFitnessServer/`
+- `sparkyfitness-integration/SparkyFitnessFrontend/`
+
+In the regular user flow:
+- the Foods page requests recommendations from the SparkyFitness backend
+- the backend calls the ML serving API
+- ranked recommendations are rendered in the app UI
+
+### How feedback is captured
+
+Two feedback paths are implemented:
+- **ML-system path:** serving `POST /feedback` writes explicit outcomes to `user_feedback` and updates `user_interactions`
+- **SparkyFitness path:** `recommendation_interactions` records app-level actions such as `logged`, `saved`, and `dismissed`
+
+### How production data is saved for retraining
+
+Production-serving activity is persisted in PostgreSQL:
+- `prediction_log` stores ranked outputs
+- `inference_features` stores live feature payloads for drift monitoring
+- `user_feedback` and `user_interactions` store outcomes used by retraining
+
+`src/data/batch_pipeline.py` reads the production interaction tables and merges them back into the next versioned training package.
+
+### How retraining and redeployment work
+
+When retraining is triggered:
+1. `retrain_api.py` launches `retrain_pipeline.py`
+2. Soda checks and training-quality checks run
+3. training computes NDCG-based evaluation and safeguarding gates
+4. passing models are registered in MLflow Staging
+5. promotion moves the selected model to Production
+6. `app_production.py` hot-reloads the new Production version automatically
+
+### Safeguarding plan
+
+The implemented safeguarding plan is in `safeguarding/SAFEGUARDING_PLAN.md` and is enforced by:
+- fairness gates before registration
+- SHAP-based explainability artifacts and `/explain`
+- model-version transparency in serving responses and MLflow
+- 90-day retention cleanup for `inference_features`
+- monitoring, drift detection, promotion control, and rollback
+
+### Role-owned evaluation and monitoring
+
+- **Data:** ingestion quality checks, training-set quality checks, live drift monitoring
+- **Training:** NDCG@10 evaluation, fairness gate, model-quality gates before registration
+- **Serving:** operational metrics, output monitoring, feedback logging, hot-reload, rollback triggers
+
+### Bonus-item integration
+
+If a team member attempted a prior-stage bonus item, the demo should point to the integrated location in the unified system rather than presenting it as a standalone subsystem. In this repo, examples include:
+- safeguarding logic wired into retraining and serving
+- explainability exposed through `/explain`
+- monitoring and rollback connected to the deployed serving stack
+
 ---
 
 ## Joint Responsibilities (12/15)
