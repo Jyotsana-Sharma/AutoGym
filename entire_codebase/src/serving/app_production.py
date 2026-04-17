@@ -40,6 +40,16 @@ from prometheus_client import Counter, Histogram, Gauge
 from .prediction_logger import PredictionLogger
 from .model_loader import ModelLoader
 
+# Safeguarding: explainability — import with graceful fallback
+try:
+    import sys as _sys
+    import os as _os
+    _sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), "..", ".."))
+    from safeguarding.explainability import Explainer
+    _EXPLAINER_AVAILABLE = True
+except Exception:
+    _EXPLAINER_AVAILABLE = False
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -111,6 +121,7 @@ _model_lock = threading.RLock()
 _model: xgb.Booster | None = None
 _model_version: str = "unknown"
 _model_source: str = "none"
+_explainer: "Explainer | None" = None
 
 loader = ModelLoader(
     model_name=MLFLOW_MODEL_NAME,
@@ -121,12 +132,20 @@ prediction_logger = PredictionLogger(database_url=DATABASE_URL) if LOG_PREDICTIO
 
 
 def _load_model_once():
-    global _model, _model_version, _model_source
+    global _model, _model_version, _model_source, _explainer
     m, version, source = loader.load_production_model()
     with _model_lock:
         _model = m
         _model_version = version
         _model_source = source
+        # Safeguarding: build explainer whenever model reloads
+        if _EXPLAINER_AVAILABLE and m is not None:
+            try:
+                _explainer = Explainer(m, feature_columns=FEATURE_COLUMNS)
+                logger.info("SHAP Explainer initialized for model version=%s", version)
+            except Exception as exc:
+                logger.warning("Explainer init failed (non-fatal): %s", exc)
+                _explainer = None
     try:
         model_version_gauge.set(float(version.lstrip("v")) if version.lstrip("v").isdigit() else 0)
     except Exception:
@@ -297,6 +316,16 @@ async def predict(request: PredictRequest):
         except Exception as exc:
             logger.warning("Prediction logging failed (non-fatal): %s", exc)
 
+        # Safeguarding: log raw inference features for drift monitoring
+        try:
+            await prediction_logger.log_features(
+                request_id=request.request_id,
+                model_version=version,
+                instances=request.instances,
+            )
+        except Exception as exc:
+            logger.warning("Feature logging failed (non-fatal): %s", exc)
+
     return response
 
 
@@ -313,6 +342,40 @@ async def receive_feedback(payload: dict):
             logger.warning("Feedback logging failed: %s", exc)
             raise HTTPException(status_code=500, detail="Feedback storage failed")
     return {"accepted": True}
+
+
+class ExplainRequest(BaseModel):
+    instance: dict
+    top_k: int = 10
+
+
+@app.post("/explain")
+async def explain_prediction(request: ExplainRequest):
+    """
+    Safeguarding — Explainability: return SHAP-based explanation for a single
+    candidate recipe instance. Answers "why was this recipe recommended?".
+
+    Pass the same feature dict you would send as one element of /predict instances.
+    Returns top contributing features and a human-readable explanation string.
+    """
+    with _model_lock:
+        explainer = _explainer
+
+    if explainer is None:
+        if not _EXPLAINER_AVAILABLE:
+            raise HTTPException(
+                status_code=501,
+                detail="Explainability not available — shap package not installed",
+            )
+        raise HTTPException(status_code=503, detail="Explainer not initialized yet")
+
+    try:
+        result = explainer.explain_prediction(request.instance, top_k=request.top_k)
+    except Exception as exc:
+        logger.exception("Explanation failed")
+        raise HTTPException(status_code=500, detail=f"Explanation error: {str(exc)}")
+
+    return result
 
 
 @app.post("/admin/reload")

@@ -54,6 +54,8 @@ def evaluate_and_register(
     metrics: dict[str, float],
     config_path: str | None = None,
     tags: dict[str, str] | None = None,
+    fairness_passed: bool = True,
+    fairness_summary: str = "not_run",
 ) -> dict[str, Any]:
     """
     Evaluate model quality gates and register to MLflow Registry if passing.
@@ -61,7 +63,7 @@ def evaluate_and_register(
     Quality gates (all must pass):
       1. ndcg_at_10 >= NDCG_THRESHOLD
       2. ndcg_at_10 > current production - IMPROVEMENT_THRESHOLD  (or no prod exists)
-      3. No missing critical metrics
+      3. fairness_passed — per-group NDCG within 20% of overall, allergen safety <1%
 
     Returns a result dict with keys:
       - registered: bool
@@ -85,6 +87,10 @@ def evaluate_and_register(
             "value": ndcg,
             "prod_value": prod_ndcg,
             "threshold_delta": IMPROVEMENT_THRESHOLD,
+        },
+        "fairness": {
+            "passed": fairness_passed,
+            "summary": fairness_summary,
         },
     }
 

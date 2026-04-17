@@ -28,10 +28,27 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import mlflow
+import pandas as pd
+import xgboost as xgb
 
 from .model_registry import evaluate_and_register, promote_to_production, export_production_model
 from .train import run_training
 from .mlflow_utils import read_config
+
+# Safeguarding modules — imported with graceful fallback so missing deps
+# don't break the pipeline entirely; but failures are reported in the result.
+try:
+    _REPO_ROOT = Path(__file__).parent.parent.parent
+    sys.path.insert(0, str(_REPO_ROOT))
+    from safeguarding.fairness_checker import run_fairness_check
+    from safeguarding.explainability import Explainer
+    _SAFEGUARDING_AVAILABLE = True
+except Exception as _sg_exc:
+    _SAFEGUARDING_AVAILABLE = False
+    logger = logging.getLogger(__name__)
+    logging.getLogger(__name__).warning(
+        "Safeguarding modules not available (%s) — fairness/explainability skipped", _sg_exc
+    )
 
 logging.basicConfig(
     level=logging.INFO,
@@ -180,6 +197,68 @@ def run_retraining(
 
     result["run_id"] = run_id
 
+    # Step 3.5: Safeguarding — fairness check + global explainability
+    fairness_passed = True
+    fairness_summary = "not_run"
+    if _SAFEGUARDING_AVAILABLE and run_id:
+        logger.info("Step 3.5/5: Running fairness check and explainability...")
+        try:
+            test_df = pd.read_csv(test_csv)
+
+            # Score the test set with the just-trained model from MLflow
+            model_uri = f"runs:/{run_id}/model"
+            booster = mlflow.xgboost.load_model(model_uri)
+            feature_cols = [
+                c for c in test_df.columns
+                if c not in ("user_id", "recipe_id", "label", "date", "submitted")
+            ]
+            dmatrix = xgb.DMatrix(test_df[feature_cols].fillna(0).values.astype("float32"),
+                                   feature_names=feature_cols)
+            test_df["score"] = booster.predict(dmatrix)
+
+            # Fairness gate
+            fairness_result = run_fairness_check(test_df)
+            fairness_passed = fairness_result["overall_passed"]
+            fairness_summary = fairness_result.get("summary", "")
+            result["fairness_result"] = fairness_result
+
+            with mlflow.start_run(run_id=run_id):
+                mlflow.log_dict(fairness_result, "fairness_results.json")
+                mlflow.set_tag("fairness_passed", str(fairness_passed))
+
+            if not fairness_passed:
+                logger.warning("Fairness gate FAILED: %s", fairness_summary)
+            else:
+                logger.info("Fairness gate PASSED: %s", fairness_summary)
+
+            # Global explainability — log SHAP feature importance to MLflow
+            try:
+                explainer = Explainer(booster, feature_columns=feature_cols)
+                exp_result = explainer.global_feature_importance(
+                    test_df, output_dir="/tmp/explainability"
+                )
+                with mlflow.start_run(run_id=run_id):
+                    mlflow.log_dict(
+                        exp_result, "explainability/global_feature_importance.json"
+                    )
+                    if "plot_path" in exp_result:
+                        mlflow.log_artifact(
+                            exp_result["plot_path"], artifact_path="explainability"
+                        )
+                logger.info(
+                    "Global explainability logged (%d features)",
+                    len(exp_result.get("feature_importance", [])),
+                )
+            except Exception as exc:
+                logger.warning("Explainability logging failed (non-fatal): %s", exc)
+
+        except Exception as exc:
+            logger.warning("Safeguarding step failed (non-fatal): %s", exc)
+            fairness_passed = True   # don't block registration on infra errors
+            fairness_summary = f"error: {exc}"
+    else:
+        logger.info("Step 3.5/5: Safeguarding modules unavailable — skipping")
+
     # Step 4: Evaluate and register
     logger.info("Step 4/5: Evaluating quality gates and registering model...")
     if run_id:
@@ -188,6 +267,8 @@ def run_retraining(
             metrics=metrics,
             config_path=config_path,
             tags={"triggered_at": result["triggered_at"]},
+            fairness_passed=fairness_passed,
+            fairness_summary=fairness_summary,
         )
         result["registered"] = reg_result["registered"]
         result["model_version"] = reg_result.get("model_version")

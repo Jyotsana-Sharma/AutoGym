@@ -289,6 +289,36 @@ def log_drift_to_db(conn, drift_results: dict):
             pass
 
 
+def cleanup_old_inference_features(conn, retention_days: int = 90) -> int:
+    """
+    Safeguarding — Privacy: delete inference feature rows older than retention_days.
+    Called every monitoring cycle to enforce the 90-day data retention policy.
+    Returns the number of rows deleted.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """DELETE FROM inference_features
+                   WHERE captured_at < NOW() - INTERVAL '%s days'""",
+                (retention_days,),
+            )
+            deleted = cur.rowcount
+        conn.commit()
+        if deleted > 0:
+            logger.info(
+                "Privacy retention: deleted %d inference_features rows older than %d days",
+                deleted, retention_days,
+            )
+        return deleted
+    except Exception as exc:
+        logger.warning("Retention cleanup failed (non-fatal): %s", exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return 0
+
+
 def trigger_retraining(reason: str) -> bool:
     """Send a retraining trigger webhook to the retrain-api service."""
     payload = {
@@ -330,6 +360,10 @@ def run_once(report_only: bool = False) -> dict[str, Any]:
         conn = get_db_connection()
     except Exception as exc:
         logger.warning("DB connection failed: %s", exc)
+
+    # 0. Privacy retention — delete inference features older than 90 days
+    if conn:
+        cleanup_old_inference_features(conn, retention_days=90)
 
     # 1. Ingestion quality check
     ingestion_result = check_ingestion_quality()
