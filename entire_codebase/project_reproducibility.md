@@ -183,15 +183,13 @@ curl -s -X POST http://localhost:8000/explain \
 
 ## Scenario B — Full Stack with SparkyFitness Integration
 
-The ML recommendation feature is provided in this repo as an **integration patch set** under
-`sparkyfitness-integration/`. The ML system is complete inside `entire_codebase/`; the upstream
-SparkyFitness application still needs these files mounted or copied into that service.
+The ML recommendation feature is **already integrated** into SparkyFitness — the patched backend and frontend files are included in this repo under `sparkyfitness-integration/`. There is nothing extra to fetch or apply.
 
 ```
 AutoGym/entire_codebase/               ← the repo you already cloned
     sparkyfitness-integration/
-        SparkyFitnessServer/           ← patched backend integration files
-        SparkyFitnessFrontend/         ← patched frontend integration files
+        SparkyFitnessServer/           ← patched backend (already integrated)
+        SparkyFitnessFrontend/         ← patched frontend (already integrated)
         INTEGRATION_GUIDE.md           ← explains what was changed and why
 ```
 

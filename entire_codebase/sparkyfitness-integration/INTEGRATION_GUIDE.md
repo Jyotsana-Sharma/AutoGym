@@ -3,11 +3,6 @@
 This directory contains all files needed to add the **personalised recipe
 recommendation** feature to the SparkyFitness application.
 
-Important clarification:
-- This directory is an **integration patch set**, not a standalone copy of the full upstream SparkyFitness repo.
-- The unified ML system lives in `entire_codebase/`.
-- These files show exactly how the open-source service calls the ML system in the regular user flow.
-
 ---
 
 ## Directory map → where each file goes
@@ -38,10 +33,6 @@ psql -U sparky -d sparkydb -f SparkyFitnessServer/db/add_recommendations.sql
 This creates two tables:
 - `recommendation_cache` — stores ML-generated scores per user
 - `recommendation_interactions` — feedback loop (viewed / logged / dismissed / saved)
-
-`recommendation_interactions` captures application-level feedback inside SparkyFitness.
-The ML system itself separately captures serving-level feedback through its `/feedback`
-endpoint and stores it in `user_feedback` / `user_interactions`.
 
 ---
 
@@ -172,10 +163,6 @@ recommendationRoutes (Express)
       ▼
 User clicks "Add to Diary" → feedback logged → recommendation_interactions
 ```
-
-For milestone demos, show both parts:
-- the **open-source service path** above, where the recommendation feature is used in the Foods page
-- the **ML-system path** in `entire_codebase/`, where `/predict`, `/feedback`, retraining, evaluation, and monitoring run
 
 ---
 

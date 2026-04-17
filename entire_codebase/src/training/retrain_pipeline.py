@@ -12,7 +12,7 @@ Orchestrates:
 Invoked by:
   - retrain_api.py (via HTTP webhook from drift monitor / scheduler)
   - GitHub Actions CI workflow
-  - Manual: python -m src.retrain_pipeline --config configs/training/xgb_ranker.yaml
+  - Manual: python -m src.retrain_pipeline --config configs/train/xgb_ranker.yaml
 """
 
 from __future__ import annotations
@@ -308,7 +308,7 @@ def run_retraining(
 
 def main():
     parser = argparse.ArgumentParser(description="SparkyFitness Retraining Pipeline")
-    parser.add_argument("--config", default="configs/training/xgb_ranker.yaml")
+    parser.add_argument("--config", default="configs/train/xgb_ranker.yaml")
     parser.add_argument("--train-csv", default=None)
     parser.add_argument("--val-csv", default=None)
     parser.add_argument("--test-csv", default=None)

@@ -41,7 +41,7 @@ _current_job: dict[str, Any] = {"status": "idle", "result": None, "triggered_at"
 
 
 class TriggerRequest(BaseModel):
-    config: str = "configs/training/xgb_ranker.yaml"
+    config: str = "configs/train/xgb_ranker.yaml"
     train_csv: str | None = None
     val_csv: str | None = None
     test_csv: str | None = None
