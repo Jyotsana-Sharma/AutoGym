@@ -1,8 +1,8 @@
 # SparkyFitness ML System — Unified Makefile
 #
 # Usage:
-#   make setup           → first-time build + start infra
-#   make run-all         → start complete system
+#   make setup-sparky    → first-time: init submodule + copy integration files (run once)
+#   make run-all         → start complete system (ML + SparkyFitness)
 #   make data            → run batch data pipeline
 #   make train           → trigger retraining (async via API)
 #   make train-direct    → run trainer container directly (blocking)
@@ -15,9 +15,10 @@ COMPOSE     = docker compose
 SERVING_URL ?= http://localhost:8000
 RETRAIN_URL ?= http://localhost:8080
 MLFLOW_URL  ?= http://localhost:5000
+SPARKY_URL  ?= http://localhost:3004
 
-.PHONY: help setup build run-all run-infra run-serving run-monitoring \
-        data generate-data train train-direct retrain-status \
+.PHONY: help setup setup-sparky build run-all run-infra run-serving run-monitoring \
+        run-sparkyfitness data generate-data train train-direct retrain-status \
         promote rollback model-info smoke-test fairness drift-check \
         soda-checks status logs logs-serving logs-train stop clean \
         restart-serving pipeline mlflow-ui grafana-ui psql
@@ -27,6 +28,8 @@ help:
 	@echo "SparkyFitness ML System"
 	@echo "======================"
 	@echo ""
+	@echo "  make setup-sparky    Init submodule + copy integration files (run once after clone)"
+	@echo "  make run-all         Start complete system: ML pipeline + SparkyFitness UI"
 	@echo "  make setup           Build images + start postgres + mlflow"
 	@echo "  make run-all         Start the complete system"
 	@echo "  make run-infra       Start postgres + mlflow only"
@@ -48,6 +51,10 @@ help:
 # ---------------------------------------------------------------------------
 # Setup & Build
 # ---------------------------------------------------------------------------
+setup-sparky:
+	@echo "Setting up SparkyFitness integration..."
+	@bash scripts/setup-sparkyfitness.sh
+
 setup: build run-infra
 	@echo "Waiting for infrastructure..."
 	@sleep 10
@@ -74,7 +81,11 @@ run-monitoring: run-infra
 	$(COMPOSE) --profile monitoring up -d \
 	  prometheus alertmanager grafana postgres-exporter drift-monitor
 
-run-all: run-infra run-serving run-monitoring
+run-sparkyfitness:
+	$(COMPOSE) --profile sparkyfitness up -d
+	@echo "SparkyFitness running at $(SPARKY_URL)"
+
+run-all: run-infra run-serving run-monitoring run-sparkyfitness
 	@$(COMPOSE) --profile data up -d data-generator
 	@echo ""
 	@echo "System running:"

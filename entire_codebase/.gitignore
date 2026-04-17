@@ -1,12 +1,11 @@
 # Environment / credentials — NEVER commit
 .env
-*.sh
 kaggle.json
 .kaggle/
 app-cred-*.sh
 *openrc*.sh
-PROJECT_PROPOSAL.md
-CHAMELEON_DEPLOYMENT.md
+# Allow scripts/*.sh but block credential shell scripts (covered above)
+!scripts/*.sh
 
 # Python
 __pycache__/

@@ -183,64 +183,81 @@ curl -s -X POST http://localhost:8000/explain \
 
 ## Scenario B — Full Stack with SparkyFitness Integration
 
-The ML recommendation feature is **already integrated** into SparkyFitness — the patched backend and frontend files are included in this repo under `sparkyfitness-integration/`. There is nothing extra to fetch or apply.
+Everything needed is already in this repo:
+- `sparkyfitness-integration/` — the ML recommendation patch files for SparkyFitness
+- `docker-compose.yml` — SparkyFitness containers (`sparkyfitness-db`, `sparkyfitness-server`, `sparkyfitness-frontend`) already wired with `ML_RECOMMENDATION_URL=http://sparky-serving:8000`
+- `scripts/setup-sparkyfitness.sh` — applies all patches automatically
+- `.env.sparky.example` — all environment variables with safe defaults
 
-```
-AutoGym/entire_codebase/               ← the repo you already cloned
-    sparkyfitness-integration/
-        SparkyFitnessServer/           ← patched backend (already integrated)
-        SparkyFitnessFrontend/         ← patched frontend (already integrated)
-        INTEGRATION_GUIDE.md           ← explains what was changed and why
-```
+### Three commands to run everything
 
-### Step B1 — Start the ML System
+**Step B1 — Add SparkyFitness as a submodule** (once, after first clone):
 
 ```bash
-cd AutoGym/entire_codebase
+git submodule add https://github.com/CodeWithCJ/SparkyFitness.git SparkyFitness
+git submodule update --init --recursive
+```
+
+> If you already cloned with `--recurse-submodules`, skip this.
+
+**Step B2 — Run the setup script** (once, applies all integration patches):
+
+```bash
+bash scripts/setup-sparkyfitness.sh
+```
+
+This script:
+- Copies all ML recommendation files into the SparkyFitness submodule
+- Patches `SparkyFitnessServer.ts` to register the recommendation route
+- Creates `SparkyFitness/.env` from `.env.sparky.example`
+
+**Step B3 — Start everything with one command**:
+
+```bash
 docker compose --profile pipeline up -d
 ```
 
-Wait until serving is healthy:
+This starts 14 containers in the correct order (batch-pipeline and trainer run once and exit; 12 stay running at steady state):
+
+```
+postgres + mlflow
+      ↓
+batch-pipeline (compile training data)
+      ↓  exits 0
+trainer (XGBoost + fairness gate + MLflow registration)
+      ↓  exits 0
+sparky-serving  ←─────────────────────────┐
+retrain-api                               │ sparky-net (shared network)
+drift-monitor                             │
+prometheus + grafana + alertmanager       │
+      +                                   │
+sparkyfitness-db                          │
+sparkyfitness-server ─────────────────────┘  ML_RECOMMENDATION_URL=http://sparky-serving:8000
+sparkyfitness-frontend (port 3004)
+```
+
+### Verify
 
 ```bash
+# ML system healthy
 curl http://localhost:8000/health
-# → {"status":"healthy","model":"xgb_recipe_ranker",...}
+
+# SparkyFitness UI
+open http://localhost:3004/foods
+# Navigate to Foods → Recommended Recipes
+# You should see ML-ranked recipe cards
 ```
 
-### Step B2 — Start SparkyFitness
+### Access the UIs
 
-SparkyFitness needs two environment variables so it can reach the ML serving container. Since both run on the same Docker network (`sparky-net`, declared in this repo's `docker-compose.yml`), containers communicate by name:
+| Interface | URL |
+|---|---|
+| SparkyFitness App | http://localhost:3004 |
+| ML Serving API docs | http://localhost:8000/docs |
+| MLflow | http://localhost:5000 |
+| Grafana | http://localhost:3000 (admin / sparky_admin) |
 
-In your SparkyFitness `docker-compose.yml`, add to the server service:
-
-```yaml
-services:
-  sparkyfitnessserver:
-    environment:
-      ML_RECOMMENDATION_URL: http://sparky-serving:8000
-      ML_MODEL_NAME: sparky-ranker
-    networks:
-      - sparky-net          # join the ML system's network
-
-networks:
-  sparky-net:
-    external: true          # declared in AutoGym/entire_codebase/docker-compose.yml
-```
-
-Then start SparkyFitness:
-
-```bash
-cd SparkyFitness
-docker compose up -d
-```
-
-### Step B3 — Verify Integration
-
-1. Open SparkyFitness in your browser
-2. Navigate to **Foods** → **Recommended Recipes**
-3. The page shows ML-ranked recipe recommendations from the serving API
-
-If the ML service is unreachable, SparkyFitness automatically falls back to a protein-proximity heuristic — the page still works, it just returns unranked results.
+If the ML service is unreachable, SparkyFitness automatically falls back to a protein-proximity heuristic — the Foods page still works.
 
 ---
 

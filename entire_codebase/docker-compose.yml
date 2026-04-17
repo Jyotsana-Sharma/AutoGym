@@ -11,11 +11,8 @@ version: "3.9"
 networks:
   sparky-net:
     driver: bridge
-    # Mark as external so SparkyFitness's docker-compose can join it:
-    #   networks:
-    #     sparky-net:
-    #       external: true
-    # Then set ML_RECOMMENDATION_URL=http://sparky-serving:8000 in SparkyFitness env.
+  sparkyfitness-network:
+    driver: bridge
 
 volumes:
   postgres-data:
@@ -25,6 +22,9 @@ volumes:
   grafana-data:
   models-cache:
   training-data:
+  sparkyfitness-db-data:
+  sparkyfitness-uploads:
+  sparkyfitness-backup:
 
 x-common-env: &common-env
   POSTGRES_HOST: postgres
@@ -320,3 +320,87 @@ services:
       postgres:
         condition: service_healthy
     restart: unless-stopped
+
+  # =========================================================================
+  # SPARKYFITNESS APPLICATION
+  # Run scripts/setup-sparkyfitness.sh once before starting these services.
+  # =========================================================================
+
+  sparkyfitness-db:
+    image: postgres:15-alpine
+    container_name: sparkyfitness-db
+    restart: always
+    networks: [sparkyfitness-network]
+    profiles: ["sparkyfitness", "pipeline"]
+    environment:
+      POSTGRES_DB: ${SPARKY_FITNESS_DB_NAME:-sparkyfitness_db}
+      POSTGRES_USER: ${SPARKY_FITNESS_DB_USER:-sparky}
+      POSTGRES_PASSWORD: ${SPARKY_FITNESS_DB_PASSWORD:-sparky_fit_pass}
+    volumes:
+      - sparkyfitness-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${SPARKY_FITNESS_DB_USER:-sparky} -d ${SPARKY_FITNESS_DB_NAME:-sparkyfitness_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  sparkyfitness-server:
+    build:
+      context: ./SparkyFitness
+      dockerfile: docker/Dockerfile.backend.dev
+    container_name: sparkyfitness-server
+    command: pnpm start
+    restart: always
+    networks: [sparkyfitness-network, sparky-net]
+    profiles: ["sparkyfitness", "pipeline"]
+    environment:
+      SPARKY_FITNESS_DB_USER: ${SPARKY_FITNESS_DB_USER:-sparky}
+      SPARKY_FITNESS_DB_HOST: sparkyfitness-db
+      SPARKY_FITNESS_DB_NAME: ${SPARKY_FITNESS_DB_NAME:-sparkyfitness_db}
+      SPARKY_FITNESS_DB_PASSWORD: ${SPARKY_FITNESS_DB_PASSWORD:-sparky_fit_pass}
+      SPARKY_FITNESS_APP_DB_USER: ${SPARKY_FITNESS_APP_DB_USER:-sparkyapp}
+      SPARKY_FITNESS_APP_DB_PASSWORD: ${SPARKY_FITNESS_APP_DB_PASSWORD:-sparky_app_pass}
+      SPARKY_FITNESS_DB_PORT: ${SPARKY_FITNESS_DB_PORT:-5432}
+      SPARKY_FITNESS_API_ENCRYPTION_KEY: ${SPARKY_FITNESS_API_ENCRYPTION_KEY:-changeme_32char_key_for_prod_use!}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-changeme_better_auth_secret_for_production}
+      SPARKY_FITNESS_FRONTEND_URL: ${SPARKY_FITNESS_FRONTEND_URL:-http://localhost:3004}
+      SPARKY_FITNESS_DISABLE_SIGNUP: ${SPARKY_FITNESS_DISABLE_SIGNUP:-false}
+      SPARKY_FITNESS_ADMIN_EMAIL: ${SPARKY_FITNESS_ADMIN_EMAIL:-}
+      SPARKY_FITNESS_LOG_LEVEL: ${SPARKY_FITNESS_LOG_LEVEL:-info}
+      ALLOW_PRIVATE_NETWORK_CORS: ${ALLOW_PRIVATE_NETWORK_CORS:-false}
+      SPARKY_FITNESS_EXTRA_TRUSTED_ORIGINS: ${SPARKY_FITNESS_EXTRA_TRUSTED_ORIGINS:-}
+      GARMIN_MICROSERVICE_URL: http://sparkyfitness-garmin:8000
+      ML_RECOMMENDATION_URL: http://sparky-serving:8000
+      ML_MODEL_NAME: sparky-ranker
+    volumes:
+      - ./SparkyFitness/SparkyFitnessServer:/app/SparkyFitnessServer:z
+      - /app/SparkyFitnessServer/node_modules
+      - ./SparkyFitness/node_modules:/app/node_modules:z
+      - sparkyfitness-uploads:/app/SparkyFitnessServer/uploads
+      - sparkyfitness-backup:/app/SparkyFitnessServer/backup
+    ports:
+      - "3010:3010"
+    depends_on:
+      sparkyfitness-db:
+        condition: service_healthy
+
+  sparkyfitness-frontend:
+    build:
+      context: ./SparkyFitness
+      dockerfile: docker/Dockerfile.frontend.dev
+    container_name: sparkyfitness-frontend
+    restart: always
+    networks: [sparkyfitness-network]
+    profiles: ["sparkyfitness", "pipeline"]
+    environment:
+      SPARKY_FITNESS_FRONTEND_URL: ${SPARKY_FITNESS_FRONTEND_URL:-http://localhost:3004}
+      SPARKY_FITNESS_SERVER_HOST: sparkyfitness-server
+      SPARKY_FITNESS_SERVER_PORT: 3010
+      VITE_BACKEND_HOST: sparkyfitness-server
+    volumes:
+      - ./SparkyFitness/SparkyFitnessFrontend:/app/SparkyFitnessFrontend:z
+      - /app/SparkyFitnessFrontend/node_modules
+    ports:
+      - "3004:8080"
+    depends_on:
+      - sparkyfitness-server
