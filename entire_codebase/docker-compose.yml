@@ -1,6 +1,7 @@
 # SparkyFitness ML System — Unified docker-compose
 # All services share a single build context (repository root).
 # Usage:
+#   docker compose --profile pipeline up -d   → ONE COMMAND: full pipeline (data→train→serve+monitor)
 #   make run-all               → full system
 #   docker compose --profile serving up -d
 #   docker compose --profile monitoring up -d
@@ -114,7 +115,7 @@ services:
       target: data
     container_name: sparky-batch-pipeline
     networks: [sparky-net]
-    profiles: ["data", "retrain", "full"]
+    profiles: ["data", "retrain", "full", "pipeline"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -140,7 +141,7 @@ services:
       target: data
     container_name: sparky-drift-monitor
     networks: [sparky-net]
-    profiles: ["monitoring", "full"]
+    profiles: ["monitoring", "full", "pipeline"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -167,12 +168,14 @@ services:
       target: training
     container_name: sparky-trainer
     networks: [sparky-net]
-    profiles: ["retrain", "full"]
+    profiles: ["retrain", "full", "pipeline"]
     depends_on:
       mlflow:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      batch-pipeline:
+        condition: service_completed_successfully
     volumes:
       - training-data:/training-data
       - mlflow-artifacts:/app/local/mlartifacts
@@ -193,7 +196,7 @@ services:
       target: training
     container_name: sparky-retrain-api
     networks: [sparky-net]
-    profiles: ["monitoring", "full"]
+    profiles: ["monitoring", "full", "pipeline"]
     depends_on:
       mlflow:
         condition: service_healthy
@@ -225,12 +228,14 @@ services:
       target: serving
     container_name: sparky-serving
     networks: [sparky-net]
-    profiles: ["serving", "full"]
+    profiles: ["serving", "full", "pipeline"]
     depends_on:
       mlflow:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      trainer:
+        condition: service_completed_successfully
     volumes:
       - models-cache:/models
       - mlflow-artifacts:/app/local/mlartifacts
@@ -258,7 +263,7 @@ services:
     image: prom/prometheus:v2.51.2
     container_name: sparky-prometheus
     networks: [sparky-net]
-    profiles: ["monitoring", "full"]
+    profiles: ["monitoring", "full", "pipeline"]
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
@@ -276,7 +281,7 @@ services:
     image: prom/alertmanager:v0.27.0
     container_name: sparky-alertmanager
     networks: [sparky-net]
-    profiles: ["monitoring", "full"]
+    profiles: ["monitoring", "full", "pipeline"]
     volumes:
       - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
     command:
@@ -289,7 +294,7 @@ services:
     image: grafana/grafana:10.4.2
     container_name: sparky-grafana
     networks: [sparky-net]
-    profiles: ["monitoring", "full"]
+    profiles: ["monitoring", "full", "pipeline"]
     volumes:
       - grafana-data:/var/lib/grafana
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
@@ -306,7 +311,7 @@ services:
     image: prometheuscommunity/postgres-exporter:v0.15.0
     container_name: sparky-postgres-exporter
     networks: [sparky-net]
-    profiles: ["monitoring", "full"]
+    profiles: ["monitoring", "full", "pipeline"]
     environment:
       DATA_SOURCE_NAME: "postgresql://sparky:${POSTGRES_PASSWORD:-sparky_pass}@postgres:5432/sparky?sslmode=disable"
     ports:

@@ -347,28 +347,36 @@ docker compose --profile retrain run --rm trainer
 
 ---
 
-## Full Pipeline in One Go (Data → Train → Promote → Verify)
+## Full Pipeline in One Command (Data → Train → Serve → Monitor)
 
 ```bash
-# Build images
-docker compose build
+docker compose --profile pipeline up -d
+```
 
-# Start infrastructure (postgres + mlflow)
-docker compose up -d postgres mlflow
+That's it. Docker Compose executes the stages in strict order using `depends_on` with `condition: service_completed_successfully`:
 
-# Wait for them to be healthy (~30 seconds)
-sleep 30
+```
+postgres + mlflow start and pass healthchecks
+        ↓
+batch-pipeline runs (compiles train/val/test CSVs)
+        ↓  exits 0
+trainer runs (XGBoost + fairness gate + MLflow registration)
+        ↓  exits 0
+serving starts (loads model, serves /predict /explain)
+retrain-api starts
+drift-monitor starts (checks for feature drift every 5 min)
+prometheus + grafana + alertmanager start
+```
 
-# Compile training data
-docker compose --profile retrain run --rm batch-pipeline
+If **any step fails** (e.g. fairness gate rejects the model), the chain stops — serving never starts. Fix the issue and re-run the same command.
 
-# Train, run fairness gate, register to MLflow
-docker compose --profile retrain run --rm trainer
+**Watch progress in real time:**
+```bash
+docker compose --profile pipeline logs -f
+```
 
-# Start serving + monitoring
-docker compose --profile serving --profile monitoring up -d
-
-# Verify
+**Verify when done:**
+```bash
 curl http://localhost:8000/health
 ```
 
