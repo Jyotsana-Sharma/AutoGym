@@ -162,27 +162,6 @@ async function saveRecommendations(
   if (recommendations.length === 0) return [];
   const client = await getClient(userId);
   try {
-    // Ensure table exists
-    await client.query(`CREATE EXTENSION IF NOT EXISTS pgcrypto`);
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS recommendation_cache (
-        id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        request_id    TEXT,
-        user_id       TEXT NOT NULL,
-        meal_id       TEXT NOT NULL,
-        ml_user_id    INTEGER,
-        ml_recipe_id  INTEGER,
-        score         DOUBLE PRECISION NOT NULL,
-        model_version TEXT NOT NULL DEFAULT 'unknown',
-        created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        expires_at    TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '1 day')
-      )
-    `);
-    await client.query(`ALTER TABLE recommendation_cache ADD COLUMN IF NOT EXISTS request_id TEXT`);
-    await client.query(`ALTER TABLE recommendation_cache ADD COLUMN IF NOT EXISTS ml_user_id INTEGER`);
-    await client.query(`ALTER TABLE recommendation_cache ADD COLUMN IF NOT EXISTS ml_recipe_id INTEGER`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_recommendation_cache_request ON recommendation_cache(request_id)`);
-
     const params: unknown[] = [];
     const valueClauses = recommendations.map((rec, i) => {
       const base = i * 8;
@@ -258,15 +237,6 @@ async function getRecommendationForFeedback(userId: any, recommendationId: strin
 async function logInteraction(userId: any, recommendationId: string, action: string): Promise<void> {
   const client = await getClient(userId);
   try {
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS recommendation_interactions (
-        id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        recommendation_id UUID NOT NULL,
-        user_id           TEXT NOT NULL,
-        action            TEXT NOT NULL,
-        created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
     await client.query(
       `INSERT INTO recommendation_interactions (recommendation_id, user_id, action)
        VALUES ($1, $2, $3)`,

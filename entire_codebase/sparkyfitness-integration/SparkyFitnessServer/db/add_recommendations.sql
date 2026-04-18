@@ -1,13 +1,13 @@
 -- =============================================================================
 -- Migration: Personalized Recipe Recommendations
--- Apply to SparkyFitness PostgreSQL database.
+-- Run as the database owner (sparky), not the app user (sparkyapp).
+-- Safe to re-run (idempotent).
 -- =============================================================================
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- ---------------------------------------------------------------------------
 -- recommendation_cache
--- Stores ML-generated recommendations per user (one batch per request).
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS recommendation_cache (
     id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -18,7 +18,6 @@ CREATE TABLE IF NOT EXISTS recommendation_cache (
     ml_recipe_id      INTEGER,
     score             DOUBLE PRECISION NOT NULL,
     model_version     TEXT NOT NULL DEFAULT 'unknown',
-    feature_snapshot  JSONB,          -- optional: store feature vector for debugging
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     expires_at        TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '1 day')
 );
@@ -31,7 +30,6 @@ CREATE INDEX IF NOT EXISTS idx_rec_cache_request
 
 -- ---------------------------------------------------------------------------
 -- recommendation_interactions
--- Tracks what users did with recommendations (feedback loop).
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS recommendation_interactions (
     id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -45,19 +43,17 @@ CREATE INDEX IF NOT EXISTS idx_rec_interactions_user_id
     ON recommendation_interactions (user_id, created_at DESC);
 
 -- ---------------------------------------------------------------------------
--- Row-Level Security — users can only see their own rows
--- (Append these to rls_policies.sql as well)
+-- Row-Level Security
 -- ---------------------------------------------------------------------------
 ALTER TABLE recommendation_cache        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE recommendation_interactions ENABLE ROW LEVEL SECURITY;
 
--- Replace 'auth.uid()' with the expression used elsewhere in rls_policies.sql
--- (SparkyFitness uses better-auth; check existing policies for the exact expression).
 DO $$
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_policies
-        WHERE tablename = 'recommendation_cache' AND policyname = 'user_own_recommendations'
+        WHERE tablename = 'recommendation_cache'
+          AND policyname = 'user_own_recommendations'
     ) THEN
         EXECUTE $pol$
             CREATE POLICY user_own_recommendations ON recommendation_cache
@@ -67,11 +63,24 @@ BEGIN
 
     IF NOT EXISTS (
         SELECT 1 FROM pg_policies
-        WHERE tablename = 'recommendation_interactions' AND policyname = 'user_own_interactions'
+        WHERE tablename = 'recommendation_interactions'
+          AND policyname = 'user_own_interactions'
     ) THEN
         EXECUTE $pol$
             CREATE POLICY user_own_interactions ON recommendation_interactions
                 USING (user_id = current_setting('app.current_user_id', true))
         $pol$;
+    END IF;
+END$$;
+
+-- ---------------------------------------------------------------------------
+-- Grants for the app user
+-- (sparkyapp is created by SparkyFitness server on first run)
+-- ---------------------------------------------------------------------------
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sparkyapp') THEN
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON recommendation_cache TO sparkyapp';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON recommendation_interactions TO sparkyapp';
     END IF;
 END$$;
