@@ -291,7 +291,7 @@ ln -s ~/AutoGym/entire_codebase ~/sparky-ml
 ls -la ~ | grep sparky-ml
 # Expected:  lrwxrwxrwx ... sparky-ml -> /home/cc/AutoGym/entire_codebase
 ls ~/sparky-ml
-# Should show: Dockerfile  Makefile  configs  docker  src  requirements  docker-compose.yml ...
+# Should show: Dockerfile  Makefile  configs  src  requirements  docker-compose.yml ...
 ```
 
 > If the repo is private, use a Personal Access Token:
@@ -469,6 +469,11 @@ NDCG_THRESHOLD=0.55          # minimum NDCG@10 for model registration
 IMPROVEMENT_THRESHOLD=0.01   # new model must not regress > 1% vs. production
 DRIFT_THRESHOLD=0.05         # KS-test p-value below which drift is detected
 CHECK_INTERVAL_SECONDS=300   # drift monitor polling interval (seconds)
+
+# ── Monitoring / rollback ─────────────────────────────────────────────────
+GRAFANA_PASSWORD=choose_a_strong_grafana_password
+ROLLBACK_WEBHOOK_TOKEN=paste_random_token_here
+ROLLBACK_ALERT_NAMES=HighErrorRate
 ```
 
 Save with `Ctrl+O`, exit with `Ctrl+X`.
@@ -480,8 +485,7 @@ Save with `Ctrl+O`, exit with `Ctrl+X`.
 For the current integrated deliverable, SparkyFitness is started from the same
 `~/sparky-ml/docker-compose.yml` file as the ML system. Add the SparkyFitness
 values to `~/sparky-ml/.env`; you do not need a separate
-`~/SparkyFitness/docker/.env` unless you intentionally deploy the upstream app
-with its own Compose file.
+SparkyFitness Compose environment file.
 
 ```bash
 cd ~/sparky-ml
@@ -765,17 +769,14 @@ Expected response contains `"current_stage": "Production"`.
 
 ---
 
-### Step 22 — Start serving and monitoring
+### Step 22 — Start steady-state runtime
 
 ```bash
-# Serving API (port 8000) + retrain webhook (port 8080)
-make run-serving
-
-# Prometheus + Grafana + drift monitor
-make run-monitoring
+# Start the 11 long-running services without rerunning one-shot training jobs
+docker compose --profile runtime up -d
 
 # Confirm all containers are running
-make status
+docker compose --profile runtime ps
 ```
 
 Expected output:
@@ -787,6 +788,9 @@ sparky-retrain-api     Up    0.0.0.0:8080->8080/tcp
 sparky-drift-monitor   Up
 sparky-prometheus      Up    0.0.0.0:9090->9090/tcp
 sparky-grafana         Up    0.0.0.0:3000->3000/tcp
+sparkyfitness-db       Up
+sparkyfitness-server   Up    0.0.0.0:3010->3010/tcp
+sparkyfitness-frontend Up    0.0.0.0:3004->8080/tcp
 ```
 
 ---
@@ -931,90 +935,23 @@ Privacy retention: deleted 0 inference_features rows older than 90 days
 
 ---
 
-## Phase 9 — Legacy Separate SparkyFitness Startup
+## Phase 9 — Legacy Separate SparkyFitness Startup Removed
 
-Use this section only if you intentionally deployed SparkyFitness from a
-separate `~/SparkyFitness/docker` Compose project. The milestone deployment
-uses the unified `docker compose --profile pipeline up -d --build` command from
-`~/sparky-ml`, which starts SparkyFitness and the ML services on shared Compose
-networks without manual `docker network connect`.
+Earlier drafts of this guide deployed SparkyFitness from a separate upstream
+Compose project and then manually connected networks. That path is no longer
+used for the milestone because it duplicates infrastructure and is easier to
+misconfigure.
 
-### Step 27 — Create the build override file
-
-The upstream `docker-compose.prod.yml` pulls pre-built Docker Hub images that do
-not contain the recommendation feature. This override file swaps in local builds
-so your integration code is included.
+Use only the unified deployment from `~/sparky-ml`:
 
 ```bash
-cd ~/SparkyFitness/docker
-
-cat > docker-compose.sparky-build.yml << 'EOF'
-services:
-  sparkyfitness-server:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.backend
-    container_name: sparkyfitness-server
-    environment:
-      ML_RECOMMENDATION_URL: ${ML_RECOMMENDATION_URL:-http://localhost:8000}
-
-  sparkyfitness-frontend:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.frontend
-EOF
+docker compose --profile pipeline up -d --build   # first bootstrap
+docker compose --profile runtime up -d            # normal restarts
 ```
 
----
-
-### Step 28 — Build and start SparkyFitness
-
-```bash
-cd ~/SparkyFitness/docker
-
-# Build from local source and start (takes 3–5 minutes on first run)
-docker compose \
-  -f docker-compose.prod.yml \
-  -f docker-compose.sparky-build.yml \
-  --env-file .env \
-  up -d --build
-
-# Check all containers started
-docker compose \
-  -f docker-compose.prod.yml \
-  -f docker-compose.sparky-build.yml \
-  --env-file .env \
-  ps
-```
-
-Wait until all three show healthy or running:
-
-```
-sparkyfitness-db        running (healthy)
-sparkyfitness-server    running (healthy)
-sparkyfitness-frontend  running
-```
-
-If `sparkyfitness-server` is not healthy after 60 seconds:
-```bash
-docker logs sparkyfitness-server --tail 30
-```
-
----
-
-### Step 29 — Connect SparkyFitness to the ML network
-
-The SparkyFitness backend needs to reach the ML serving container.
-Run this once after every fresh deploy:
-
-```bash
-# Connect the server container to the ML network
-docker network connect sparky-ml_sparky-net sparkyfitness-server
-
-# Verify the connection was made
-docker network inspect sparky-ml_sparky-net | grep sparkyfitness
-# Should show sparkyfitness-server in the output
-```
+The unified Compose file builds SparkyFitness locally, applies the ML
+integration with `sparkyfitness-setup`, and connects the app to the ML serving
+container automatically.
 
 ---
 
@@ -1103,16 +1040,9 @@ Replace `YOUR_IP` with your KVM floating IP.
 If the instance reboots (but is not deleted):
 
 ```bash
-# ML system
 cd ~/sparky-ml
-make run-infra && make run-serving && make run-monitoring
-
-# SparkyFitness
-cd ~/SparkyFitness/docker
-docker compose -f docker-compose.prod.yml -f docker-compose.sparky-build.yml --env-file .env up -d
-
-# Reconnect networks
-docker network connect sparky-ml_sparky-net sparkyfitness-server
+docker compose --profile runtime up -d
+docker compose --profile runtime ps
 ```
 
 ---
@@ -1216,14 +1146,15 @@ make clean            # destroy all containers and volumes (destructive)
 # 1. Check ML API is running
 curl http://localhost:8000/health
 
-# 2. Check network link between containers
-docker network inspect sparky-ml_sparky-net | grep sparkyfitness
+# 2. Confirm the unified runtime containers are up
+cd ~/sparky-ml
+docker compose --profile runtime ps
 
-# 3. If network link is missing
-docker network connect sparky-ml_sparky-net sparkyfitness-server
-
-# 4. Check SparkyFitness server logs for ML call errors
+# 3. Check SparkyFitness server logs for ML call errors
 docker logs sparkyfitness-server --tail 50 | grep -i recommend
+
+# 4. Confirm the app sees the ML service name inside Compose
+docker exec sparkyfitness-server sh -lc 'echo $ML_RECOMMENDATION_URL'
 ```
 
 ### Fairness gate fails — model not registered
@@ -1356,9 +1287,9 @@ docker builder prune -f      # remove build cache
 ```bash
 docker logs sparkyfitness-db --tail 30
 # If there are permission errors, reset the volume:
-cd ~/SparkyFitness/docker
-docker compose -f docker-compose.prod.yml -f docker-compose.sparky-build.yml --env-file .env down -v
-docker compose -f docker-compose.prod.yml -f docker-compose.sparky-build.yml --env-file .env up -d --build
+cd ~/sparky-ml
+docker compose --profile runtime down -v
+docker compose --profile pipeline up -d --build
 ```
 
 ### `sparkyfitness-server` crash-loops with SyntaxError on recommendationRoutes
@@ -1370,31 +1301,21 @@ SyntaxError: The requested module './routes/recommendationRoutes.js'
 ```
 
 Cause: The upstream `CodeWithCJ/SparkyFitness` repo has broken class-based stub
-files for the recommendation feature. The `cp` commands in Step 12 must overwrite
-them with the correct function-based implementations.
+files for the recommendation feature. The unified deployment uses
+`sparkyfitness-setup` / `apply_integration.py` to overwrite them with the correct
+function-based implementations.
 
 Fix:
 
 ```bash
-INTEG=~/AutoGym/entire_codebase/sparkyfitness-integration
-SF=~/SparkyFitness
+cd ~/sparky-ml
 
-# Overwrite the broken upstream stubs with correct versions
-cp $INTEG/SparkyFitnessServer/routes/recommendationRoutes.ts     $SF/SparkyFitnessServer/routes/
-cp $INTEG/SparkyFitnessServer/services/recommendationService.ts  $SF/SparkyFitnessServer/services/
-cp $INTEG/SparkyFitnessServer/models/recommendationRepository.ts $SF/SparkyFitnessServer/models/
-
-# Verify last line of each file now shows export default
-tail -1 $SF/SparkyFitnessServer/routes/recommendationRoutes.ts
-tail -1 $SF/SparkyFitnessServer/services/recommendationService.ts
-grep "export default" $SF/SparkyFitnessServer/models/recommendationRepository.ts
+# Re-apply the integration patch
+docker compose --profile pipeline run --rm sparkyfitness-setup
 
 # Rebuild and restart
-cd ~/SparkyFitness/docker
-docker compose -f docker-compose.prod.yml -f docker-compose.sparky-build.yml \
-  --env-file .env build --no-cache sparkyfitness-server
-docker compose -f docker-compose.prod.yml -f docker-compose.sparky-build.yml \
-  --env-file .env up -d sparkyfitness-server
+docker compose --profile runtime build --no-cache sparkyfitness-server
+docker compose --profile runtime up -d sparkyfitness-server
 sleep 10 && docker ps | grep sparkyfitness-server
 ```
 
@@ -1409,16 +1330,15 @@ Fix:
 
 ```bash
 # Check what is currently set
-grep FRONTEND_URL ~/SparkyFitness/docker/.env
+grep FRONTEND_URL ~/sparky-ml/.env
 
 # Compare with the IP you are actually using in the browser
 # If they differ (e.g., .126 vs .226), fix it:
-sed -i 's/OLD_IP/NEW_IP/g' ~/SparkyFitness/docker/.env
+sed -i 's/OLD_IP/NEW_IP/g' ~/sparky-ml/.env
 
 # Restart server to pick up the new value
-cd ~/SparkyFitness/docker
-docker compose -f docker-compose.prod.yml -f docker-compose.sparky-build.yml \
-  --env-file .env up -d sparkyfitness-server
+cd ~/sparky-ml
+docker compose --profile runtime up -d sparkyfitness-server
 
 # Confirm the value the server actually loaded
 docker logs sparkyfitness-server 2>&1 | grep FRONTEND_URL
