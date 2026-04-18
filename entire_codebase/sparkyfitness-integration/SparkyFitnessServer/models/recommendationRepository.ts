@@ -78,7 +78,7 @@ async function getRecentlyLoggedMealIds(userId: any, days: number): Promise<Set<
       `SELECT DISTINCT meal_template_id
          FROM food_entry_meals
         WHERE meal_template_id IS NOT NULL
-          AND entry_date >= CURRENT_DATE - ($1 || ' days')::interval`,
+          AND entry_date >= CURRENT_DATE - ($1 * interval '1 day')`,
       [days]
     );
     return new Set(result.rows.map((r: any) => r.meal_template_id as string));

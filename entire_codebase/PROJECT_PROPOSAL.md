@@ -29,7 +29,7 @@
    - 5.5 [Accountability](#55-accountability)
    - 5.6 [Robustness](#56-robustness)
 6. [SparkyFitness Integration](#6-sparkyFitness-integration)
-7. [Feature Schema (47 Dimensions)](#7-feature-schema-47-dimensions)
+7. [Feature Schema (45 Dimensions)](#7-feature-schema-45-dimensions)
 8. [API Contracts](#8-api-contracts)
 9. [Infrastructure and Container Architecture](#9-infrastructure-and-container-architecture)
 10. [Monitoring Stack](#10-monitoring-stack)
@@ -51,7 +51,7 @@ The system is deployed on **Chameleon Cloud (KVM@TACC)** with a single `docker-c
 | Metric | Value |
 |---|---|
 | Model quality | NDCG@10 = **0.8148** on held-out test set |
-| Feature vector | **47 dimensions** (recipe + nutritional + allergen + user history) |
+| Feature vector | **45 dimensions** (recipe + nutritional + allergen + user history) |
 | Inference latency | P50 < 50 ms, P99 < 100 ms |
 | Training automation | 4-stage CI/CD with automatic model promotion |
 | Retraining trigger | Automated via KS-test drift monitor or scheduled weekly |
@@ -92,7 +92,7 @@ Generic recipe recommendation systems fail in two fundamental ways:
 │    → Cuisine mapping (100+ tags → 20 categories)                                │
 │    → Allergen detection (9 allergen types)                                      │
 │    → Nutrition parsing + label generation (rating ≥ 4 → positive)              │
-│    → PCA cooking history (3 components)                                          │
+│    → PCA cooking history (6 components)                                          │
 │    → Time-stratified split (train/val/test — no leakage)                        │
 │    → manifest.json (SHA-256 + git commit + timestamp)                           │
 │    → Upload to Swift: proj04-sparky-training-data                               │
@@ -141,7 +141,7 @@ Generic recipe recommendation systems fail in two fundamental ways:
 │  app_production.py (FastAPI + Uvicorn, 2 workers)                               │
 │    → GET  /health     → liveness + model version                                │
 │    → POST /predict    → ranked recipe list                                      │
-│         • assemble_features() → 47-dim float32 matrix                          │
+│         • assemble_features() → 45-dim float32 matrix                          │
 │         • XGBoost DMatrix → booster.predict() → sort by score                  │
 │         • prediction_logger.log_batch() → PostgreSQL (predictions)              │
 │         • prediction_logger.log_features() → PostgreSQL (inference_features)   │
@@ -262,7 +262,7 @@ The batch pipeline merges historical data with new production interactions to bu
    - Nutritional parsing (`calories`, `total_fat`, `sugar`, `sodium`, `protein`, `saturated_fat`, `carbohydrate`)
    - Aggregation: `avg_rating`, `n_reviews` from interaction join
    - Label generation: `rating ≥ 4 → label=1`
-   - PCA cooking history: 6-component → **3 components** used in 47-feature schema (`history_pc1`, `history_pc2`, `history_pc3`)
+   - PCA cooking history: 6 components used in 45-feature schema (`history_pc1`–`history_pc6`)
 4. Time-stratified split:
    - **Train**: All interactions before the last 14 days
    - **Test**: Interactions from day −14 to day −7
@@ -319,7 +319,7 @@ reg_lambda:       1.0
 
 ```
 Step 1: Load versioned CSV data (SHA-256 verified against manifest)
-        → PreparedFrames: feature matrix (N×47), group arrays, feature names
+        → PreparedFrames: feature matrix (N×45), group arrays, feature names
 
 Step 2: XGBoost LambdaRank training
         → XGBRanker.fit(X_train, y_train, group=groups_train, eval_set=...)
@@ -451,10 +451,10 @@ This means deployments require zero downtime — the old model continues serving
 
 ```
 POST /predict
-Request: {request_id, model_name, instances: [{47 feature keys}]}
+Request: {request_id, model_name, instances: [{45 feature keys}]}
 
 1. assemble_features(instances)
-   → 47-dim float32 matrix + user_ids + recipe_ids
+   → 45-dim float32 matrix + user_ids + recipe_ids
 2. DMatrix(features, group=[len(instances)])
 3. booster.predict(dmatrix) → raw LambdaRank scores
 4. Sort by score descending → assign ranks 1..N
@@ -471,7 +471,7 @@ Response: {request_id, model_name, model_version, generated_at,
 
 ```
 POST /explain
-Request: {instance: {47 feature keys}, top_k: 10}
+Request: {instance: {45 feature keys}, top_k: 10}
 
 1. Get _explainer (SHAP TreeExplainer, rebuilt after each model reload)
 2. explainer.explain_prediction(instance, top_k=top_k)
@@ -490,7 +490,7 @@ This endpoint enables users and operators to understand *why* a specific recipe 
 **File**: `src/serving/prediction_logger.py`
 **Called from**: `app_production.py` `/predict` handler
 
-Every prediction request captures the full 47-feature vector to PostgreSQL:
+Every prediction request captures the full 45-feature vector to PostgreSQL:
 
 ```sql
 -- Table: inference_features
@@ -530,7 +530,7 @@ drift_detected = p_value < DRIFT_THRESHOLD  # default: 0.05
 - Recipe: `minutes`, `n_ingredients`, `n_steps`, `avg_rating`, `n_reviews`
 - Nutrition: `calories`, `total_fat`, `sugar`, `sodium`, `protein`, `saturated_fat`, `carbohydrate`
 - User targets: `daily_calorie_target`, `protein_target_g`, `carbs_target_g`, `fat_target_g`
-- History: `history_pc1`, `history_pc2`, `history_pc3`
+- History: `history_pc1`, `history_pc2`, `history_pc3`, `history_pc4`, `history_pc5`, `history_pc6`
 
 **Overall drift**: Triggered if >30% of features show individual drift (`drift_rate > 0.3`).
 
@@ -732,7 +732,7 @@ ML_RECOMMENDATION_URL: http://sparky-serving:8000
 ### What the Integration Does
 
 1. SparkyFitness assembles candidate recipes for a user from its recipe database
-2. For each candidate, it constructs a feature dict matching the 47-feature schema
+2. For each candidate, it constructs a feature dict matching the 45-feature schema
 3. Sends `POST /predict` with all candidates as a batch
 4. The ML model scores and ranks the candidates
 5. SparkyFitness renders the ranked list — the ML model's ranking replaces the default sort order
@@ -743,22 +743,22 @@ The integration means ML recommendations appear in the **regular user flow** of 
 
 ---
 
-## 7. Feature Schema (47 Dimensions)
+## 7. Feature Schema (45 Dimensions)
 
 All features are encoded as `float32`. Missing values are filled with `0.0`. String/categorical features use sorted-unique integer mapping (unknown → -1).
 
 | Category | Features | Count |
 |---|---|---|
+| **Interaction** | `rating` | 1 |
 | **Recipe basics** | `minutes`, `n_ingredients`, `n_steps`, `avg_rating`, `n_reviews` | 5 |
 | **Cuisine** | `cuisine` (string → integer encoding) | 1 |
-| **Nutrition** | `calories`, `total_fat`, `sugar`, `sodium`, `protein`, `saturated_fat`, `carbohydrate` | 7 |
+| **Nutrition (raw)** | `calories`, `total_fat`, `sugar`, `sodium`, `protein`, `saturated_fat`, `carbohydrate` | 7 |
+| **Nutrition (g variants)** | `total_fat_g`, `sugar_g`, `sodium_g`, `protein_g`, `saturated_fat_g`, `carbohydrate_g` | 6 |
 | **Allergens** | `has_egg`, `has_fish`, `has_milk`, `has_nuts`, `has_peanut`, `has_sesame`, `has_shellfish`, `has_soy`, `has_wheat` | 9 |
 | **User macro targets** | `daily_calorie_target`, `protein_target_g`, `carbs_target_g`, `fat_target_g` | 4 |
 | **User dietary flags** | `user_vegetarian`, `user_vegan`, `user_gluten_free`, `user_dairy_free`, `user_low_sodium`, `user_low_fat` | 6 |
-| **User history PCA** | `history_pc1`, `history_pc2`, `history_pc3` | 3 |
-| **Nutrition (g variants)** | `calories_g`, `total_fat_g`, `sugar_g`, `sodium_g`, `protein_g`, `saturated_fat_g`, `carbohydrate_g` | 7 |
-| **Interaction context** | `meal_type`, `time_of_day`, `day_of_week`, `interaction_count`, `user_avg_rating` | 5 |
-| **Total** | | **47** |
+| **User history PCA** | `history_pc1`, `history_pc2`, `history_pc3`, `history_pc4`, `history_pc5`, `history_pc6` | 6 |
+| **Total** | | **45** |
 
 The training pipeline (`ranking_data.py`) and serving pipeline (`assemble_features()` in `app_production.py`) use the same ordered feature list — eliminating train/serve skew.
 
@@ -789,6 +789,7 @@ The training pipeline (`ranking_data.py`) and serving pipeline (`assemble_featur
     {
       "user_id": 37449,
       "recipe_id": 33096,
+      "rating": 0.0,
       "minutes": 10,
       "cuisine": "italian",
       "n_ingredients": 8,
@@ -796,21 +797,28 @@ The training pipeline (`ranking_data.py`) and serving pipeline (`assemble_featur
       "avg_rating": 4.5,
       "n_reviews": 120,
       "calories": 380.0,
-      "protein": 22.0,
       "total_fat": 14.0,
-      "carbohydrate": 45.0,
       "sugar": 5.0,
       "sodium": 620.0,
+      "protein": 22.0,
       "saturated_fat": 4.0,
-      "has_milk": 1, "has_egg": 0, "has_nuts": 0, "has_peanut": 0,
-      "has_fish": 0, "has_shellfish": 0, "has_wheat": 1, "has_soy": 0, "has_sesame": 0,
+      "carbohydrate": 45.0,
+      "total_fat_g": 14.0,
+      "sugar_g": 5.0,
+      "sodium_g": 620.0,
+      "protein_g": 22.0,
+      "saturated_fat_g": 4.0,
+      "carbohydrate_g": 45.0,
+      "has_egg": 0, "has_fish": 0, "has_milk": 1, "has_nuts": 0, "has_peanut": 0,
+      "has_sesame": 0, "has_shellfish": 0, "has_soy": 0, "has_wheat": 1,
       "daily_calorie_target": 2200.0,
       "protein_target_g": 60.0,
       "carbs_target_g": 275.0,
       "fat_target_g": 65.0,
       "user_vegetarian": 0, "user_vegan": 0, "user_gluten_free": 0,
       "user_dairy_free": 0, "user_low_sodium": 0, "user_low_fat": 0,
-      "history_pc1": 0.42, "history_pc2": -0.11, "history_pc3": 0.07
+      "history_pc1": 0.42, "history_pc2": -0.11, "history_pc3": 0.07,
+      "history_pc4": 0.02, "history_pc5": -0.05, "history_pc6": 0.01
     }
   ]
 }
@@ -1102,7 +1110,7 @@ Given any registered model, the exact dataset, code, and hyperparameters used to
 
 ### Training Team Deliverables (3/15 points) — COMPLETED
 
-- [x] **XGBoost LambdaRank model** (`retrain_pipeline.py`): `rank:ndcg` objective, NDCG@10 = 0.8148, 47-feature vector, early stopping
+- [x] **XGBoost LambdaRank model** (`retrain_pipeline.py`): `rank:ndcg` objective, NDCG@10 = 0.8148, 45-feature vector, early stopping
 - [x] **MLflow experiment tracking**: All params + metrics + artifacts logged per run; model registry with Staging/Production/Archived stages
 - [x] **Automated retraining pipeline**: `retrain_pipeline.py` triggered by: CI/CD push, weekly cron, drift webhook (POST to `retrain-api`)
 - [x] **Fairness gate wired into training** (Step 3.5): per-group NDCG@10 and allergen safety, hard blocker on registration if fairness_passed = False

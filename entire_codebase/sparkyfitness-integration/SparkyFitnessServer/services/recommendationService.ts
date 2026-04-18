@@ -141,8 +141,8 @@ async function callMLPredict(requestId: string, instances: MLInstance[]): Promis
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function getRecommendations(userId: any, limit: number, excludeRecentDays: number) {
   const [goals, recentlyLogged] = await Promise.all([
-    recommendationRepository.getUserGoals(userId),
-    recommendationRepository.getRecentlyLoggedMealIds(userId, excludeRecentDays),
+    recommendationRepository.getUserGoals(userId).catch(() => ({ calories: 2000, protein: 50, carbs: 250, fat: 65 })),
+    recommendationRepository.getRecentlyLoggedMealIds(userId, excludeRecentDays).catch(() => new Set<string>()),
   ]);
 
   const candidates = await recommendationRepository.getCandidateMeals(userId, recentlyLogged, CANDIDATE_POOL_SIZE);
