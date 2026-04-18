@@ -170,7 +170,7 @@ This command:
 
 1. Builds all images from the single multi-stage Dockerfile.
 2. Creates required Docker volumes automatically.
-3. Applies the SparkyFitness ML integration.
+3. Builds the SparkyFitness API/UI images with the ML integration already baked in.
 4. Runs data compilation.
 5. Trains, evaluates, and registers a model in MLflow.
 6. Starts serving, app, retraining API, monitoring, and drift monitor.

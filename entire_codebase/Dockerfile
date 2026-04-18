@@ -7,6 +7,8 @@
 #   training  → XGBoost training, retrain API
 #   serving   → FastAPI prediction server
 #   mlflow    → MLflow tracking server (minimal, no shared base needed)
+#   sparkyfitness-backend  → integrated SparkyFitness API
+#   sparkyfitness-frontend → integrated SparkyFitness UI
 #
 # Each stage gets only its own dependencies, so images stay small.
 # The shared "base" stage carries OS packages + the safeguarding/ module,
@@ -62,6 +64,44 @@ COPY src/serving/ ./src/serving/
 
 EXPOSE 8000
 CMD ["uvicorn", "src.serving.app_production:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+
+# ── SparkyFitness app base ────────────────────────────────────────────────────
+# Apply the ML recommendation integration during image build. This avoids a
+# Compose timing race where application images could be built before the
+# one-shot setup container patched the checked-out SparkyFitness tree.
+FROM node:22-alpine AS sparkyfitness-base
+
+RUN apk add --no-cache python3 && corepack enable
+
+WORKDIR /app
+
+COPY SparkyFitness/package.json SparkyFitness/pnpm-lock.yaml SparkyFitness/pnpm-workspace.yaml ./
+COPY SparkyFitness/SparkyFitnessServer/package.json ./SparkyFitnessServer/package.json
+COPY SparkyFitness/SparkyFitnessFrontend/package.json ./SparkyFitnessFrontend/package.json
+COPY SparkyFitness/SparkyFitnessMobile/package.json ./SparkyFitnessMobile/package.json
+COPY SparkyFitness/shared/package.json ./shared/package.json
+RUN pnpm install
+
+COPY SparkyFitness/ ./
+COPY sparkyfitness-integration/ /integration/
+COPY .env.sparky.example /env.example
+RUN APP_DIR=/app INTEGRATION_DIR=/integration ENV_EXAMPLE=/env.example python3 /integration/apply_integration.py
+
+# ── SparkyFitness backend ─────────────────────────────────────────────────────
+FROM sparkyfitness-base AS sparkyfitness-backend
+
+WORKDIR /app/SparkyFitnessServer
+
+EXPOSE 3010
+CMD ["pnpm", "start"]
+
+# ── SparkyFitness frontend ────────────────────────────────────────────────────
+FROM sparkyfitness-base AS sparkyfitness-frontend
+
+WORKDIR /app/SparkyFitnessFrontend
+
+EXPOSE 8080
+CMD ["pnpm", "run", "dev", "--host", "0.0.0.0"]
 
 # ── MLflow stage (self-contained, no shared deps needed) ──────────────────────
 FROM python:3.11-slim AS mlflow

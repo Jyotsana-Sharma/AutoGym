@@ -5,6 +5,8 @@
 #   docker compose --profile runtime up -d    → steady-state runtime only, no one-shot jobs
 #   make run-all                           → bootstrap profile wrapper
 
+name: sparky-ml
+
 networks:
   sparky-net:
     driver: bridge
@@ -212,6 +214,8 @@ services:
       TEST_CSV: /training-data/test.csv
       NDCG_THRESHOLD: "0.55"
       MODEL_EXPORT_PATH: /models/xgboost_ranker.json
+      ROLLBACK_WEBHOOK_TOKEN: ${ROLLBACK_WEBHOOK_TOKEN:-}
+      ROLLBACK_ALERT_NAMES: ${ROLLBACK_ALERT_NAMES:-HighErrorRate}
     ports:
       - "8080:8080"
     command: python -m src.training.retrain_api
@@ -239,7 +243,6 @@ services:
     volumes:
       - models-cache:/models
       - mlflow-artifacts:/app/local/mlartifacts
-      - ./output/enriched_recipes.csv:/data/enriched_recipes.csv:ro
     environment:
       <<: *common-env
       DATABASE_URL: postgresql://sparky:${POSTGRES_PASSWORD:-sparky_pass}@postgres:5432/sparky
@@ -311,7 +314,8 @@ services:
 
   # =========================================================================
   # SPARKYFITNESS APPLICATION
-  # No manual setup needed — sparkyfitness-setup runs automatically first.
+  # The app images bake in the ML integration during build.
+  # sparkyfitness-setup remains as an idempotent helper for local host checkouts.
   # =========================================================================
 
   sparkyfitness-setup:
@@ -344,10 +348,10 @@ services:
 
   sparkyfitness-server:
     build:
-      context: ./SparkyFitness
-      dockerfile: docker/Dockerfile.backend.dev
+      context: .
+      dockerfile: Dockerfile
+      target: sparkyfitness-backend
     container_name: sparkyfitness-server
-    command: pnpm start
     restart: always
     networks: [sparkyfitness-network, sparky-net]
     profiles: ["sparkyfitness", "pipeline", "runtime"]
@@ -384,8 +388,9 @@ services:
 
   sparkyfitness-frontend:
     build:
-      context: ./SparkyFitness
-      dockerfile: docker/Dockerfile.frontend.dev
+      context: .
+      dockerfile: Dockerfile
+      target: sparkyfitness-frontend
     container_name: sparkyfitness-frontend
     restart: always
     networks: [sparkyfitness-network]
