@@ -386,6 +386,28 @@ services:
       sparkyfitness-db:
         condition: service_healthy
 
+  sparkyfitness-migrate:
+    image: postgres:15-alpine
+    container_name: sparkyfitness-migrate
+    networks: [sparkyfitness-network]
+    profiles: ["sparkyfitness", "pipeline", "runtime"]
+    depends_on:
+      sparkyfitness-db:
+        condition: service_healthy
+      sparkyfitness-server:
+        condition: service_started
+    environment:
+      PGPASSWORD: ${SPARKY_FITNESS_DB_PASSWORD:-sparky_fit_pass}
+    volumes:
+      - ./sparkyfitness-integration/SparkyFitnessServer/db/add_recommendations.sql:/migration.sql:ro
+    command: >
+      sh -c "sleep 10 &&
+             psql -h sparkyfitness-db
+                  -U ${SPARKY_FITNESS_DB_USER:-sparky}
+                  -d ${SPARKY_FITNESS_DB_NAME:-sparkyfitness_db}
+                  -f /migration.sql &&
+             echo 'Recommendation migration applied.'"
+
   sparkyfitness-frontend:
     build:
       context: .
