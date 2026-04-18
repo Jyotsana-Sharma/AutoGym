@@ -573,6 +573,20 @@ curl http://localhost:8080/health
 docker compose --profile pipeline ps
 ```
 
+After this first bootstrap succeeds, use the smaller steady-state runtime
+profile for normal restarts:
+
+```bash
+docker compose --profile runtime up -d
+docker compose --profile runtime ps
+```
+
+The `pipeline` profile defines 14 services because it includes three one-shot
+jobs: `sparkyfitness-setup`, `batch-pipeline`, and `trainer`. The `runtime`
+profile skips those and starts 11 steady-state services. Normal runtime startup
+does not retrain; `sparky-serving` loads the current Production model from the
+MLflow Model Registry and polls the registry for newer Production versions.
+
 Open:
 
 | Service | URL |

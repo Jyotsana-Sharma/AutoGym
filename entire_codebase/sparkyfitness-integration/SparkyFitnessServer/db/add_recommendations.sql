@@ -11,8 +11,11 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS recommendation_cache (
     id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    request_id        TEXT,
     user_id           TEXT NOT NULL,
     meal_id           TEXT NOT NULL,
+    ml_user_id        INTEGER,
+    ml_recipe_id      INTEGER,
     score             DOUBLE PRECISION NOT NULL,
     model_version     TEXT NOT NULL DEFAULT 'unknown',
     feature_snapshot  JSONB,          -- optional: store feature vector for debugging
@@ -22,6 +25,9 @@ CREATE TABLE IF NOT EXISTS recommendation_cache (
 
 CREATE INDEX IF NOT EXISTS idx_rec_cache_user_id
     ON recommendation_cache (user_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_rec_cache_request
+    ON recommendation_cache (request_id);
 
 -- ---------------------------------------------------------------------------
 -- recommendation_interactions

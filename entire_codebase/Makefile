@@ -75,18 +75,18 @@ run-infra:
 	@echo "MLflow ready."
 
 run-serving: run-infra
-	$(COMPOSE) --profile serving up -d serving retrain-api
+	$(COMPOSE) --profile runtime up -d serving retrain-api
 
 run-monitoring: run-infra
-	$(COMPOSE) --profile monitoring up -d \
-	  prometheus alertmanager grafana postgres-exporter drift-monitor
+	$(COMPOSE) --profile runtime up -d \
+	  prometheus grafana postgres-exporter drift-monitor
 
 run-sparkyfitness:
-	$(COMPOSE) --profile sparkyfitness up -d
+	$(COMPOSE) --profile runtime up -d sparkyfitness-db sparkyfitness-server sparkyfitness-frontend
 	@echo "SparkyFitness running at $(SPARKY_URL)"
 
-run-all: run-infra run-serving run-monitoring run-sparkyfitness
-	@$(COMPOSE) --profile data up -d data-generator
+run-all:
+	$(COMPOSE) --profile pipeline up -d --build
 	@echo ""
 	@echo "System running:"
 	@echo "  Serving:      $(SERVING_URL)"
@@ -100,7 +100,7 @@ run-all: run-infra run-serving run-monitoring run-sparkyfitness
 # ---------------------------------------------------------------------------
 data:
 	@echo "Running batch data pipeline..."
-	$(COMPOSE) --profile retrain run --rm batch-pipeline
+	$(COMPOSE) --profile pipeline run --rm batch-pipeline
 	@echo "Training data compiled to /training-data volume."
 
 generate-data:
@@ -118,7 +118,7 @@ train: run-infra
 	@echo "Check progress: make retrain-status"
 
 train-direct: run-infra
-	$(COMPOSE) --profile retrain run --rm trainer \
+	$(COMPOSE) --profile pipeline run --rm trainer \
 	  python -m src.training.retrain_pipeline \
 	    --config configs/training/xgb_ranker.yaml \
 	    --skip-data-checks
@@ -152,7 +152,7 @@ drift-check:
 	$(COMPOSE) run --rm drift-monitor python src/data/drift_monitor.py --once
 
 soda-checks:
-	$(COMPOSE) --profile data run --rm batch-pipeline \
+	$(COMPOSE) --profile pipeline run --rm batch-pipeline \
 	  python src/data/run_soda_checks.py \
 	    --train-csv /output/train.csv \
 	    --val-csv /output/val.csv \

@@ -45,7 +45,6 @@ A unified ML project: data → features → training → evaluation → registry
 │       └── soda_checks.yml        ← Soda data quality rules
 │
 ├── Dockerfile                     ← Single multi-stage image: data/training/serving/mlflow
-├── docker/                        ← Legacy per-role Dockerfiles retained for reference
 │
 ├── requirements/                  ← Per-role Python dependencies
 │   ├── training.txt
@@ -55,7 +54,6 @@ A unified ML project: data → features → training → evaluation → registry
 ├── monitoring/                    ← Shared observability stack
 │   ├── prometheus.yml             ← Scrape configs (serving, postgres, mlflow)
 │   ├── alert_rules.yml            ← Alerts: latency, errors, drift, model staleness
-│   ├── alertmanager.yml           ← Alert routing configuration
 │   └── grafana/
 │       ├── dashboards/ml_system.json ← Pre-built ML system dashboard
 │       └── provisioning/          ← Auto-provisioned datasources + dashboard pointers
@@ -64,6 +62,8 @@ A unified ML project: data → features → training → evaluation → registry
 │   ├── SAFEGUARDING_PLAN.md       ← Full plan: fairness, privacy, explainability, ...
 │   ├── fairness_checker.py        ← Group NDCG@10 gate + allergen safety check
 │   └── explainability.py          ← SHAP per-prediction + global feature importance
+│
+├── COURSE_CONCEPT_ALIGNMENT.md    ← Mapping to ML systems course concepts
 │
 ├── contracts/                     ← Shared API contracts (input/output schema)
 │   ├── recipe_ranker_input.sample.json
@@ -146,11 +146,14 @@ make run-serving
 # 6. Verify
 make smoke-test
 
-# 7. Start full monitoring stack
+# 7. Start monitoring stack
 make run-monitoring
 
 # --- Or, start the complete ML + SparkyFitness stack ---
 docker compose --profile pipeline up -d
+
+# After the first successful bootstrap, restart only steady-state services:
+docker compose --profile runtime up -d
 ```
 
 ---
@@ -226,8 +229,9 @@ curl -X POST http://localhost:8080/rollback \
 ```
 
 Automated rollback is implemented in CI after a failed post-promotion smoke test.
-Prometheus and Alertmanager provide monitoring signals, but alert-driven rollback
-still needs an alert-handling endpoint wired into `retrain_api.py`.
+Prometheus and Grafana provide runtime monitoring and alerting. Grafana can also
+call `POST /alerts/rollback` on the retrain API for configured critical alerts
+when `ROLLBACK_WEBHOOK_TOKEN` is set.
 
 ---
 

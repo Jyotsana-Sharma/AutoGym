@@ -39,6 +39,7 @@ from prometheus_client import Counter, Histogram, Gauge
 
 from .prediction_logger import PredictionLogger
 from .model_loader import ModelLoader
+from .feature_contract import FEATURE_COLUMNS, ID_COLUMNS
 
 # Safeguarding: explainability — import with graceful fallback
 try:
@@ -64,28 +65,6 @@ LOG_PREDICTIONS = os.environ.get("LOG_PREDICTIONS", "true").lower() == "true"
 MODEL_POLL_INTERVAL = int(os.environ.get("MODEL_POLL_INTERVAL_SEC", "60"))
 
 mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-
-# ---------------------------------------------------------------------------
-# Feature schema — matches training contract exactly
-# ---------------------------------------------------------------------------
-ID_COLUMNS = ["user_id", "recipe_id"]
-
-FEATURE_COLUMNS = [
-    "rating",
-    "minutes", "n_ingredients", "n_steps", "avg_rating", "n_reviews",
-    "cuisine",
-    "calories", "total_fat", "sugar", "sodium", "protein",
-    "saturated_fat", "carbohydrate",
-    "total_fat_g", "sugar_g", "sodium_g", "protein_g",
-    "saturated_fat_g", "carbohydrate_g",
-    "has_egg", "has_fish", "has_milk", "has_nuts", "has_peanut",
-    "has_sesame", "has_shellfish", "has_soy", "has_wheat",
-    "daily_calorie_target", "protein_target_g", "carbs_target_g", "fat_target_g",
-    "user_vegetarian", "user_vegan", "user_gluten_free", "user_dairy_free",
-    "user_low_sodium", "user_low_fat",
-    "history_pc1", "history_pc2", "history_pc3", "history_pc4",
-    "history_pc5", "history_pc6",
-]
 
 # ---------------------------------------------------------------------------
 # Prometheus custom metrics
@@ -321,6 +300,7 @@ async def predict(request: PredictRequest):
                 model_version=version,
                 predictions=predictions,
                 timestamp=now,
+                features=request.instances,
             )
             prediction_last_logged_timestamp.set(time.time())
         except Exception as exc:
@@ -403,6 +383,7 @@ def model_info():
             "model_version": _model_version,
             "model_source": _model_source,
             "model_name": MLFLOW_MODEL_NAME,
+            "id_columns": ID_COLUMNS,
             "features": FEATURE_COLUMNS,
             "feature_count": len(FEATURE_COLUMNS),
         }

@@ -7,7 +7,15 @@ import pandas as pd
 from pandas import DataFrame
 
 
-NON_FEATURE_COLUMNS = {"user_id", "recipe_id", "date", "label", "name"}
+NON_FEATURE_COLUMNS = {
+    "user_id",
+    "recipe_id",
+    "date",
+    "label",
+    "name",
+    "request_id",
+    "recommendation_id",
+}
 
 
 @dataclass

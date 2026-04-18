@@ -3,6 +3,7 @@
 **Team size:** 3 members (Data, Training, Serving)  
 **Deployment:** Chameleon Cloud KVM@TACC · VM IP `129.114.26.226`  
 **Repository:** `entire_codebase/` (ML system) + `SparkyFitness/` (integrated app)  
+**Course concept mapping:** `COURSE_CONCEPT_ALIGNMENT.md`  
 **Date:** April 2026
 
 ---
@@ -11,7 +12,7 @@
 
 ### 1. Integrated System Deployed on Chameleon Cloud
 
-The full ML system and SparkyFitness application run on a single Chameleon KVM@TACC VM, orchestrated via a **single multi-stage `Dockerfile`** and `docker-compose.yml`. The `pipeline` profile starts 15 services: one-shot setup/data/training jobs plus the steady-state app, serving, retraining, database, and monitoring services.
+The full ML system and SparkyFitness application run on a single Chameleon KVM@TACC VM, orchestrated via a **single multi-stage `Dockerfile`** and `docker-compose.yml`. The `pipeline` profile starts 14 services for bootstrap, including the one-shot setup/data/training jobs. After bootstrap, the `runtime` profile starts only the 11 steady-state services: app, serving, retraining, database, and monitoring. Normal runtime startup does **not** retrain; `sparky-serving` fetches the current Production model from the MLflow Model Registry and hot-reloads if the registry changes.
 
 **Single Dockerfile — 4 named stages:**
 
@@ -42,8 +43,7 @@ Each service in `docker-compose.yml` selects its stage via `target: data/trainin
 | `sparky-trainer` | training | One-shot XGBoost + fairness + registry pipeline | — |
 | `sparky-drift-monitor` | data | KS-test drift loop + 90-day privacy cleanup | — |
 | `prometheus` | — | Metrics scraping | 9090 |
-| `grafana` | — | Dashboards | 3000 |
-| `alertmanager` | — | Alert routing | 9093 |
+| `grafana` | — | Dashboards + Grafana alerting backed by Prometheus | 3000 |
 | `postgres-exporter` | — | PostgreSQL metrics exporter | 9187 |
 
 **Verified live endpoints on VM:**
@@ -122,8 +122,9 @@ User opens Foods page
 → User clicks "Add to Diary"
 → POST /api/recommendations/feedback (action: "logged")
 → logInteraction() writes to recommendation_interactions table
-→ app-level feedback stored in recommendation_interactions
-→ ML retraining loop currently uses serving `/feedback` plus `user_feedback` / `user_interactions`
+→ recordFeedback() forwards shared request_id + recommendation_id to ML `/feedback`
+→ app feedback joins to ML prediction_log / user_feedback / inference_features
+→ ML retraining loop uses `user_feedback` / `user_interactions`
 ```
 
 ---
@@ -381,7 +382,9 @@ Plus standard FastAPI metrics via `prometheus_fastapi_instrumentator`:
 
 ### Deliverable S2: Operational Metrics and Alerting
 
-**Implementation:** `monitoring/alert_rules.yml`, `monitoring/alertmanager.yml`
+**Implementation:** `monitoring/alert_rules.yml`, Prometheus, and Grafana alerting. The standalone Alertmanager container/config was removed from the integrated runtime to avoid duplicate alerting infrastructure.
+
+Grafana alert provisioning is included in `monitoring/grafana/provisioning/alerting/sparky-alerts.yml`. The critical `HighErrorRate` rule routes to `POST /alerts/rollback` on the retrain API when `ROLLBACK_WEBHOOK_TOKEN` is configured; the API only rolls back for configured critical alert names.
 
 **14 alert rules:**
 
@@ -409,7 +412,7 @@ Plus standard FastAPI metrics via `prometheus_fastapi_instrumentator`:
 **Implementation:** `src/serving/app_production.py`, `src/serving/prediction_logger.py`, SparkyFitness integration
 
 **Prediction logging (async, non-blocking):**  
-Every `/predict` response is asynchronously logged to `prediction_log` table: `request_id`, `model_version`, `user_id`, `recipe_id`, `score`, `rank`, `timestamp`.
+Every `/predict` response is asynchronously logged to `prediction_log` table: `request_id`, `recommendation_id`, `model_version`, `user_id`, `recipe_id`, `score`, `rank`, `timestamp`.
 
 **Inference feature logging (for drift monitoring):**  
 Every `/predict` call also writes raw feature values to `inference_features` table via `prediction_logger.log_features()` — this is what the drift monitor reads for KS-test distribution comparison.
@@ -420,13 +423,13 @@ Every `/predict` call also writes raw feature values to `inference_features` tab
 - `saved` — ★ clicked
 - `viewed` — on impression
 
-These reach `POST /api/recommendations/feedback` → `recommendationRepository.logInteraction()` → `recommendation_interactions` table.
+These reach `POST /api/recommendations/feedback` → `recommendationRepository.logInteraction()` → `recommendation_interactions` table → ML `/feedback` with the same `request_id` and `recommendation_id`.
 
 **SHAP Explainability endpoint:**  
 `POST /explain` returns top-10 SHAP feature contributions + human-readable reason string. `Explainer` instance built on model load; rebuilt on hot-reload. Graceful fallback to rule-based explanation if SHAP unavailable.
 
 **Model version tracking in every response:**  
-`model_version` + `model_source` in every `/predict` response enables per-version analysis on the serving side. App-side feedback is stored separately in `recommendation_interactions`; correlating it directly with `prediction_log` would require an explicit shared identifier to be added.
+`model_version` + `model_source` in every `/predict` response enables per-version analysis on the serving side. The shared `request_id` and `recommendation_id` allow app-side `recommendation_interactions` to join directly with ML-side `prediction_log`, `user_feedback`, and `inference_features`.
 
 **Hot-reload without downtime:**  
 `_poll_for_new_model()` background thread polls MLflow Registry every 60 seconds. On new Production version detection, swaps `_model` and `_explainer` globals under `threading.RLock`. In-flight requests complete with old model.

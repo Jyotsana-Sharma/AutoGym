@@ -60,6 +60,7 @@ class PredictionLogger:
                 CREATE TABLE IF NOT EXISTS prediction_log (
                     id              BIGSERIAL PRIMARY KEY,
                     request_id      TEXT NOT NULL,
+                    recommendation_id TEXT,
                     model_version   TEXT NOT NULL,
                     user_id         INTEGER NOT NULL,
                     recipe_id       INTEGER NOT NULL,
@@ -73,6 +74,7 @@ class PredictionLogger:
                 CREATE TABLE IF NOT EXISTS user_feedback (
                     id              BIGSERIAL PRIMARY KEY,
                     request_id      TEXT,
+                    recommendation_id TEXT,
                     user_id         INTEGER NOT NULL,
                     recipe_id       INTEGER NOT NULL,
                     rating          FLOAT,
@@ -84,6 +86,7 @@ class PredictionLogger:
                 CREATE TABLE IF NOT EXISTS inference_features (
                     id              BIGSERIAL PRIMARY KEY,
                     request_id      TEXT NOT NULL,
+                    recommendation_id TEXT,
                     model_version   TEXT NOT NULL,
                     user_id         INTEGER NOT NULL,
                     recipe_id       INTEGER NOT NULL,
@@ -93,12 +96,22 @@ class PredictionLogger:
                 CREATE INDEX IF NOT EXISTS idx_inf_features_ts ON inference_features(captured_at);
             """)
             await conn.execute("""
+                ALTER TABLE prediction_log
+                ADD COLUMN IF NOT EXISTS recommendation_id TEXT;
+
+                ALTER TABLE user_feedback
+                ADD COLUMN IF NOT EXISTS recommendation_id TEXT;
+
+                ALTER TABLE inference_features
+                ADD COLUMN IF NOT EXISTS recommendation_id TEXT;
+            """)
+            await conn.execute("""
                 ALTER TABLE user_interactions
                 DROP CONSTRAINT IF EXISTS user_interactions_action_check;
 
                 ALTER TABLE user_interactions
                 ADD CONSTRAINT user_interactions_action_check
-                CHECK (action IN ('view','cook','rate','skip','served','logged','dismissed','saved'));
+                CHECK (action IN ('view','viewed','cook','rate','skip','served','logged','dismissed','saved'));
             """)
 
     async def log_batch(
@@ -112,16 +125,32 @@ class PredictionLogger:
         """Log a batch of predictions to prediction_log."""
         if not self._pool:
             return
+        recommendation_by_recipe: dict[int, str | None] = {}
+        if features:
+            for inst in features:
+                try:
+                    recipe_id = int(inst.get("recipe_id", 0))
+                except (TypeError, ValueError):
+                    continue
+                recommendation_by_recipe[recipe_id] = inst.get("recommendation_id")
         rows = [
-            (request_id, model_version, p.user_id, p.recipe_id, p.score, p.rank)
+            (
+                request_id,
+                recommendation_by_recipe.get(p.recipe_id),
+                model_version,
+                p.user_id,
+                p.recipe_id,
+                p.score,
+                p.rank,
+            )
             for p in predictions
         ]
         try:
             async with self._pool.acquire() as conn:
                 await conn.executemany(
                     """INSERT INTO prediction_log
-                       (request_id, model_version, user_id, recipe_id, score, rank)
-                       VALUES ($1, $2, $3, $4, $5, $6)""",
+                       (request_id, recommendation_id, model_version, user_id, recipe_id, score, rank)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7)""",
                     rows,
                 )
                 # Also write top-ranked prediction as a synthetic user interaction
@@ -147,6 +176,7 @@ class PredictionLogger:
         if not self._pool:
             return
         request_id = payload.get("request_id", "")
+        recommendation_id = payload.get("recommendation_id")
         user_id = int(payload.get("user_id", 0))
         recipe_id = int(payload.get("recipe_id", 0))
         rating = payload.get("rating")
@@ -156,9 +186,9 @@ class PredictionLogger:
             async with self._pool.acquire() as conn:
                 await conn.execute(
                     """INSERT INTO user_feedback
-                       (request_id, user_id, recipe_id, rating, action)
-                       VALUES ($1, $2, $3, $4, $5)""",
-                    request_id, user_id, recipe_id,
+                       (request_id, recommendation_id, user_id, recipe_id, rating, action)
+                       VALUES ($1, $2, $3, $4, $5, $6)""",
+                    request_id, recommendation_id, user_id, recipe_id,
                     float(rating) if rating is not None else None,
                     action,
                 )
@@ -193,6 +223,7 @@ class PredictionLogger:
         rows = [
             (
                 request_id,
+                inst.get("recommendation_id"),
                 model_version,
                 int(inst.get("user_id", 0)),
                 int(inst.get("recipe_id", 0)),
@@ -204,8 +235,8 @@ class PredictionLogger:
             async with self._pool.acquire() as conn:
                 await conn.executemany(
                     """INSERT INTO inference_features
-                       (request_id, model_version, user_id, recipe_id, features)
-                       VALUES ($1, $2, $3, $4, $5::jsonb)""",
+                       (request_id, recommendation_id, model_version, user_id, recipe_id, features)
+                       VALUES ($1, $2, $3, $4, $5, $6::jsonb)""",
                     rows,
                 )
         except Exception as exc:

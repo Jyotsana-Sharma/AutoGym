@@ -44,7 +44,7 @@
 
 **SparkyFitness** is a production-grade, fully automated personalized recipe recommendation system built on a continuous learning flywheel. It ranks meal suggestions according to each user's nutritional goals, dietary restrictions, allergen constraints, and personal cooking history.
 
-The system is deployed on **Chameleon Cloud (KVM@TACC)** as a suite of 12 Docker containers orchestrated by a single `docker-compose.yml`. It integrates with the open-source **SparkyFitness** nutrition tracking application, which calls the ML serving layer at inference time for every recipe recommendation in the regular user flow.
+The system is deployed on **Chameleon Cloud (KVM@TACC)** with a single `docker-compose.yml`: the `pipeline` profile starts 14 services for bootstrap, and the `runtime` profile starts 11 steady-state services after a model exists in the MLflow Model Registry. It integrates with the open-source **SparkyFitness** nutrition tracking application, which calls the ML serving layer at inference time for every recipe recommendation in the regular user flow.
 
 ### Key Achievements
 
@@ -56,7 +56,7 @@ The system is deployed on **Chameleon Cloud (KVM@TACC)** as a suite of 12 Docker
 | Training automation | 4-stage CI/CD with automatic model promotion |
 | Retraining trigger | Automated via KS-test drift monitor or scheduled weekly |
 | Safeguarding | Fairness gate + SHAP explainability + 90-day privacy retention — all wired into pipeline |
-| Containers | 12 services, single multi-stage Dockerfile |
+| Containers | 14 bootstrap services / 11 runtime services, single multi-stage Dockerfile |
 | Cloud storage | Chameleon OpenStack Swift — versioned training datasets |
 
 ---
@@ -161,7 +161,7 @@ Generic recipe recommendation systems fail in two fundamental ways:
                             │
                             ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│  MONITORING  [containers: prometheus, grafana, alertmanager, postgres-exporter] │
+│  MONITORING  [containers: prometheus, grafana, postgres-exporter]               │
 │                                                                                 │
 │  Prometheus (port 9090) scrapes:                                                │
 │    → sparky-serving /metrics (request count, latency, errors)                  │
@@ -173,7 +173,7 @@ Generic recipe recommendation systems fail in two fundamental ways:
 │    → Drift monitor results (from PostgreSQL drift_log table)                    │
 │    → Training pipeline success/failure history                                  │
 │                                                                                 │
-│  Alertmanager (port 9093):                                                      │
+│  Grafana alerting backed by Prometheus rules:                                   │
 │    → Alert on high error rate, latency > threshold, model staleness            │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -895,38 +895,35 @@ mlflow (python:3.11-slim + mlflow==3.1.0, standalone — no base needed)
 
 The `base` stage's inclusion of `safeguarding/` is critical: both the `training` and `serving` stages import from `safeguarding.*`. Previously (with 4 separate Dockerfiles), neither had access to this module, causing runtime import errors.
 
-### Twelve Containers
+### Compose Services
 
 | Container | Image/Stage | Profile | Port | Purpose |
 |---|---|---|---|---|
-| `sparky-postgres` | postgres:15-alpine | always | 5433 | PostgreSQL database |
-| `sparky-mlflow` | mlflow stage | always | 5000 | Experiment tracking + model registry |
-| `sparky-data-generator` | data stage | data, full | — | Synthetic interaction replay |
-| `sparky-batch-pipeline` | data stage | data, retrain, full | — | Dataset compilation |
-| `sparky-drift-monitor` | data stage | monitoring, full | — | KS-test drift detection |
-| `sparky-trainer` | training stage | retrain, full | — | Model training (one-shot) |
-| `sparky-retrain-api` | training stage | monitoring, full | 8080 | Retraining webhook receiver |
-| `sparky-serving` | serving stage | serving, full | 8000 | Prediction + explain API |
-| `sparky-prometheus` | prom/prometheus | monitoring, full | 9090 | Metrics collection |
-| `sparky-alertmanager` | prom/alertmanager | monitoring, full | 9093 | Alert routing |
-| `sparky-grafana` | grafana/grafana | monitoring, full | 3000 | Visualization dashboards |
-| `sparky-postgres-exporter` | postgres-exporter | monitoring, full | 9187 | DB metrics for Prometheus |
+| Container | Image/Stage | Profile | Port | Purpose |
+|---|---|---|---|---|
+| `sparky-postgres` | postgres:15-alpine | pipeline, runtime | 5433 | ML PostgreSQL database |
+| `sparkyfitness-db` | postgres:15-alpine | pipeline, runtime | — | SparkyFitness application database |
+| `sparkyfitness-setup` | alpine/python | pipeline | — | One-shot SparkyFitness integration patch |
+| `sparkyfitness-server` | SparkyFitness | pipeline, runtime | 3010 | Express API + recommendation bridge |
+| `sparkyfitness-frontend` | SparkyFitness | pipeline, runtime | 3004 | React UI with recommendations |
+| `sparky-mlflow` | mlflow stage | pipeline, runtime | 5000 | Experiment tracking + model registry |
+| `sparky-batch-pipeline` | data stage | pipeline | — | One-shot dataset compilation |
+| `sparky-trainer` | training stage | pipeline | — | One-shot training/evaluation/registration |
+| `sparky-drift-monitor` | data stage | pipeline, runtime | — | KS-test drift detection + retention cleanup |
+| `sparky-retrain-api` | training stage | pipeline, runtime | 8080 | Retraining webhook receiver |
+| `sparky-serving` | serving stage | pipeline, runtime | 8000 | Prediction + explain API; loads Production model from registry |
+| `sparky-prometheus` | prom/prometheus | pipeline, runtime | 9090 | Metrics collection |
+| `sparky-grafana` | grafana/grafana | pipeline, runtime | 3000 | Dashboards and Grafana alerting |
+| `sparky-postgres-exporter` | postgres-exporter | pipeline, runtime | 9187 | DB metrics for Prometheus |
 
 ### Running the System
 
 ```bash
-# Full system (all containers)
-make run-all
-# or: docker compose --profile full up -d
+# First-time bootstrap or intentional full retrain
+docker compose --profile pipeline up -d --build
 
-# Serving only (inference + MLflow + Postgres)
-docker compose --profile serving up -d
-
-# Monitoring stack
-docker compose --profile monitoring up -d
-
-# One-shot training run
-docker compose --profile retrain run --rm trainer
+# Normal runtime after a Production model exists in MLflow Registry
+docker compose --profile runtime up -d
 ```
 
 ### Chameleon Cloud Deployment
@@ -991,9 +988,9 @@ docker compose --profile retrain run --rm trainer
 | **Data Quality** | Soda Core | — | Automated validation checks |
 | **Monitoring** | Prometheus | 2.51.2 | Metrics scraping |
 | | Grafana | 10.4.2 | Dashboards |
-| | Alertmanager | 0.27.0 | Alert routing |
+| | Grafana alerting | 10.4.2 | Alerting backed by Prometheus metrics |
 | **Containerization** | Docker | — | Multi-stage builds |
-| | Docker Compose | v3.9 | Multi-service orchestration |
+| | Docker Compose | v2 | Multi-service orchestration with profiles |
 | **CI/CD** | GitHub Actions | — | 4-stage automated pipeline |
 | **Compute** | Chameleon Cloud (KVM@TACC) | — | VM-based training/serving |
 | **Languages** | Python | 3.11 | All components |

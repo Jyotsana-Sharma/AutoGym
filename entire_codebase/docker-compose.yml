@@ -1,12 +1,9 @@
 # SparkyFitness ML System — Unified docker-compose
 # All services share a single build context (repository root).
 # Usage:
-#   docker compose --profile pipeline up -d   → ONE COMMAND: full pipeline (data→train→serve+monitor)
-#   make run-all               → full system
-#   docker compose --profile serving up -d
-#   docker compose --profile monitoring up -d
-
-version: "3.9"
+#   docker compose --profile pipeline up -d   → bootstrap pipeline (data→train→serve+monitor+app)
+#   docker compose --profile runtime up -d    → steady-state runtime only, no one-shot jobs
+#   make run-all                           → bootstrap profile wrapper
 
 networks:
   sparky-net:
@@ -141,7 +138,7 @@ services:
       target: data
     container_name: sparky-drift-monitor
     networks: [sparky-net]
-    profiles: ["monitoring", "full", "pipeline"]
+    profiles: ["monitoring", "full", "pipeline", "runtime"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -187,6 +184,8 @@ services:
       TEST_CSV: /training-data/test.csv
       NDCG_THRESHOLD: "0.55"
       MODEL_EXPORT_PATH: /models/xgboost_ranker.json
+      ROLLBACK_WEBHOOK_TOKEN: ${ROLLBACK_WEBHOOK_TOKEN:-}
+      ROLLBACK_ALERT_NAMES: ${ROLLBACK_ALERT_NAMES:-HighErrorRate}
     command: python -m src.training.retrain_pipeline --config configs/training/xgb_ranker.yaml
 
   retrain-api:
@@ -196,7 +195,7 @@ services:
       target: training
     container_name: sparky-retrain-api
     networks: [sparky-net]
-    profiles: ["monitoring", "full", "pipeline"]
+    profiles: ["monitoring", "full", "pipeline", "runtime"]
     depends_on:
       mlflow:
         condition: service_healthy
@@ -228,7 +227,7 @@ services:
       target: serving
     container_name: sparky-serving
     networks: [sparky-net]
-    profiles: ["serving", "full", "pipeline"]
+    profiles: ["serving", "full", "pipeline", "runtime"]
     depends_on:
       mlflow:
         condition: service_healthy
@@ -236,6 +235,7 @@ services:
         condition: service_healthy
       trainer:
         condition: service_completed_successfully
+        required: false
     volumes:
       - models-cache:/models
       - mlflow-artifacts:/app/local/mlartifacts
@@ -263,7 +263,7 @@ services:
     image: prom/prometheus:v2.51.2
     container_name: sparky-prometheus
     networks: [sparky-net]
-    profiles: ["monitoring", "full", "pipeline"]
+    profiles: ["monitoring", "full", "pipeline", "runtime"]
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
@@ -277,24 +277,11 @@ services:
       - "9090:9090"
     restart: unless-stopped
 
-  alertmanager:
-    image: prom/alertmanager:v0.27.0
-    container_name: sparky-alertmanager
-    networks: [sparky-net]
-    profiles: ["monitoring", "full", "pipeline"]
-    volumes:
-      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
-    command:
-      - --config.file=/etc/alertmanager/alertmanager.yml
-    ports:
-      - "9093:9093"
-    restart: unless-stopped
-
   grafana:
     image: grafana/grafana:10.4.2
     container_name: sparky-grafana
     networks: [sparky-net]
-    profiles: ["monitoring", "full", "pipeline"]
+    profiles: ["monitoring", "full", "pipeline", "runtime"]
     volumes:
       - grafana-data:/var/lib/grafana
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
@@ -302,6 +289,7 @@ services:
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-sparky_admin}
       GF_USERS_ALLOW_SIGN_UP: "false"
+      ROLLBACK_WEBHOOK_TOKEN: ${ROLLBACK_WEBHOOK_TOKEN:-}
     ports:
       - "3000:3000"
     restart: unless-stopped
@@ -311,7 +299,7 @@ services:
     image: prometheuscommunity/postgres-exporter:v0.15.0
     container_name: sparky-postgres-exporter
     networks: [sparky-net]
-    profiles: ["monitoring", "full", "pipeline"]
+    profiles: ["monitoring", "full", "pipeline", "runtime"]
     environment:
       DATA_SOURCE_NAME: "postgresql://sparky:${POSTGRES_PASSWORD:-sparky_pass}@postgres:5432/sparky?sslmode=disable"
     ports:
@@ -341,7 +329,7 @@ services:
     container_name: sparkyfitness-db
     restart: always
     networks: [sparkyfitness-network]
-    profiles: ["sparkyfitness", "pipeline"]
+    profiles: ["sparkyfitness", "pipeline", "runtime"]
     environment:
       POSTGRES_DB: ${SPARKY_FITNESS_DB_NAME:-sparkyfitness_db}
       POSTGRES_USER: ${SPARKY_FITNESS_DB_USER:-sparky}
@@ -362,7 +350,7 @@ services:
     command: pnpm start
     restart: always
     networks: [sparkyfitness-network, sparky-net]
-    profiles: ["sparkyfitness", "pipeline"]
+    profiles: ["sparkyfitness", "pipeline", "runtime"]
     environment:
       SPARKY_FITNESS_DB_USER: ${SPARKY_FITNESS_DB_USER:-sparky}
       SPARKY_FITNESS_DB_HOST: sparkyfitness-db
@@ -393,6 +381,7 @@ services:
     depends_on:
       sparkyfitness-setup:
         condition: service_completed_successfully
+        required: false
       sparkyfitness-db:
         condition: service_healthy
 
@@ -403,7 +392,7 @@ services:
     container_name: sparkyfitness-frontend
     restart: always
     networks: [sparkyfitness-network]
-    profiles: ["sparkyfitness", "pipeline"]
+    profiles: ["sparkyfitness", "pipeline", "runtime"]
     environment:
       SPARKY_FITNESS_FRONTEND_URL: ${SPARKY_FITNESS_FRONTEND_URL:-http://localhost:3004}
       SPARKY_FITNESS_SERVER_HOST: sparkyfitness-server
@@ -417,5 +406,6 @@ services:
     depends_on:
       sparkyfitness-setup:
         condition: service_completed_successfully
+        required: false
       sparkyfitness-server:
         condition: service_started

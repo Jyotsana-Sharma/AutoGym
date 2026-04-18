@@ -5,11 +5,6 @@ global:
     project: sparky-fitness
     environment: production
 
-alerting:
-  alertmanagers:
-    - static_configs:
-        - targets: ["alertmanager:9093"]
-
 rule_files:
   - /etc/prometheus/alert_rules.yml
 

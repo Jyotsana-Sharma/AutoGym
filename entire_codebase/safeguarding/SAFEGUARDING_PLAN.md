@@ -154,8 +154,9 @@ it must be possible to determine who approved the deployment and trace it back.
 - Previous production version archived (not deleted) — always available for comparison
 
 **Alert accountability**
-- `alertmanager.yml` routes operational alerts; CI/CD handles rollback after a
-  failed post-promotion smoke test
+- Grafana alerting routes operational alerts from Prometheus-backed queries;
+  selected critical alerts can call the authenticated retrain API rollback
+  webhook when `ROLLBACK_WEBHOOK_TOKEN` is configured
 - All promotion and rollback actions are logged in MLflow model version metadata
 
 ---
@@ -180,8 +181,8 @@ or adversarial inputs.
 - If the smoke test fails, the rollback stage calls `model_registry.rollback`
   and hot-reloads serving
 - Prometheus alerts surface `LowPredictionScores`, `HighErrorRate`, stale
-  models, and logging lag; wiring those alerts directly to rollback remains an
-  extension point
+  models, and logging lag; Grafana provisions a critical `HighErrorRate`
+  rollback route to `POST /alerts/rollback`
 
 **Model fallback**
 - If MLflow Registry is unreachable, serving falls back to a local model file
@@ -201,7 +202,7 @@ or adversarial inputs.
 **Infrastructure health monitoring**
 - Prometheus + Grafana monitor serving latency (p95), error rate, DB connections,
   disk usage, memory, and MLflow availability
-- Alertmanager with escalating severity levels (info → warning → critical)
+- Grafana alerting provides escalating severity levels (info → warning → critical)
 
 ---
 
@@ -214,14 +215,12 @@ or adversarial inputs.
 | Transparency    | Model version in response, MLflow lineage | `app_production.py`, MLflow | Yes |
 | Privacy         | Pseudonymized IDs, no PII in models, 90-day retention | `drift_monitor.py`, DB schema, pipeline design | Yes |
 | Accountability  | Retraining metrics/logs, approval gates, rollback trail | `retrain_api.py`, MLflow, GitHub Environments | Yes |
-| Robustness      | Drift monitoring, CI rollback, fallback model | `drift_monitor.py`, alerts, `model_loader.py` | Yes |
+| Robustness      | Drift monitoring, CI/Grafana rollback, fallback model | `drift_monitor.py`, alerts, `model_loader.py`, `retrain_api.py` | Yes |
 
 ---
 
 ## Known Gaps and Next Steps
 
-1. **Direct alert rollback**: Add an authenticated Alertmanager webhook receiver that can call rollback for a carefully limited set of critical alerts.
-2. **App-feedback join**: Add a shared request/recommendation identifier so SparkyFitness `recommendation_interactions` can be joined directly to ML `prediction_log`.
-3. **Differential privacy**: For larger user bases, consider DP-SGD or RAPPOR for user feature aggregation.
-4. **Counterfactual explanations**: Supplement SHAP with "if you liked more Italian food, these recipes would rank higher" style explanations.
-5. **Adversarial robustness**: Add input perturbation testing to catch unusually large feature values that could manipulate rankings.
+1. **Differential privacy**: For larger user bases, consider DP-SGD or RAPPOR for user feature aggregation.
+2. **Counterfactual explanations**: Supplement SHAP with "if you liked more Italian food, these recipes would rank higher" style explanations.
+3. **Adversarial robustness**: Add input perturbation testing to catch unusually large feature values that could manipulate rankings.

@@ -21,7 +21,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Response
+from fastapi import FastAPI, BackgroundTasks, Header, HTTPException, Response
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_latest
 from pydantic import BaseModel
 import uvicorn
@@ -51,6 +51,11 @@ retrain_job_running = Gauge(
     "sparky_retrain_job_running",
     "1 when a retraining job is running, otherwise 0",
 )
+alert_rollbacks_total = Counter(
+    "sparky_alert_rollbacks_total",
+    "Total rollback webhook requests by status",
+    ["status"],
+)
 
 # ---------------------------------------------------------------------------
 # In-memory job state (sufficient for single-node; swap with Redis for HA)
@@ -75,6 +80,40 @@ class PromoteRequest(BaseModel):
 
 class RollbackRequest(BaseModel):
     version: str | None = None
+
+
+class AlertRollbackRequest(BaseModel):
+    alerts: list[dict[str, Any]] = []
+    status: str | None = None
+    commonLabels: dict[str, Any] = {}
+    receiver: str | None = None
+
+
+def _rollback_token() -> str:
+    return os.environ.get("ROLLBACK_WEBHOOK_TOKEN", "")
+
+
+def _allowed_rollback_alerts() -> set[str]:
+    raw = os.environ.get("ROLLBACK_ALERT_NAMES", "HighErrorRate")
+    return {name.strip() for name in raw.split(",") if name.strip()}
+
+
+def _extract_firing_alert_names(payload: AlertRollbackRequest) -> set[str]:
+    names: set[str] = set()
+    for alert in payload.alerts:
+        if alert.get("status", payload.status) not in {None, "firing"}:
+            continue
+        labels = alert.get("labels") or payload.commonLabels or {}
+        if labels.get("severity") != "critical":
+            continue
+        alert_name = labels.get("alertname")
+        if alert_name:
+            names.add(str(alert_name))
+    if not names and payload.status in {None, "firing"}:
+        alert_name = payload.commonLabels.get("alertname")
+        if alert_name and payload.commonLabels.get("severity") == "critical":
+            names.add(str(alert_name))
+    return names
 
 
 def _run_job(req: TriggerRequest):
@@ -148,6 +187,49 @@ def rollback(req: RollbackRequest):
     result = rollback_production(target_version=req.version)
     if not result.get("rolled_back"):
         raise HTTPException(status_code=400, detail=result.get("reason", "Rollback failed"))
+    return result
+
+
+@app.post("/alerts/rollback")
+def rollback_from_alert(
+    req: AlertRollbackRequest,
+    authorization: str | None = Header(default=None),
+):
+    """
+    Authenticated webhook target for Grafana alerting.
+
+    The endpoint is intentionally narrow: it only accepts Bearer-token requests
+    for configured critical alert names, then rolls Production back to the
+    previous archived MLflow Registry version.
+    """
+    expected_token = _rollback_token()
+    if not expected_token:
+        alert_rollbacks_total.labels(status="disabled").inc()
+        raise HTTPException(status_code=403, detail="Rollback webhook token is not configured")
+
+    if authorization != f"Bearer {expected_token}":
+        alert_rollbacks_total.labels(status="unauthorized").inc()
+        raise HTTPException(status_code=401, detail="Invalid rollback webhook token")
+
+    firing_alerts = _extract_firing_alert_names(req)
+    allowed_alerts = _allowed_rollback_alerts()
+    actionable_alerts = sorted(firing_alerts & allowed_alerts)
+    if not actionable_alerts:
+        alert_rollbacks_total.labels(status="ignored").inc()
+        return {
+            "rolled_back": False,
+            "reason": "No configured critical rollback alert is firing",
+            "firing_alerts": sorted(firing_alerts),
+            "allowed_alerts": sorted(allowed_alerts),
+        }
+
+    result = rollback_production(target_version=None)
+    if not result.get("rolled_back"):
+        alert_rollbacks_total.labels(status="failed").inc()
+        raise HTTPException(status_code=400, detail=result.get("reason", "Rollback failed"))
+
+    alert_rollbacks_total.labels(status="rolled_back").inc()
+    result["triggered_by_alerts"] = actionable_alerts
     return result
 
 

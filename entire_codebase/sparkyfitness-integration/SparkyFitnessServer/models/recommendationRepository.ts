@@ -27,8 +27,21 @@ export interface UserGoals {
 
 export interface SavedRecommendation {
   id: string;
+  request_id: string | null;
   meal_id: string;
   score: number;
+  model_version: string;
+  ml_user_id: number | null;
+  ml_recipe_id: number | null;
+}
+
+export interface RecommendationFeedbackContext {
+  recommendation_id: string;
+  request_id: string | null;
+  user_id: string;
+  meal_id: string;
+  ml_user_id: number | null;
+  ml_recipe_id: number | null;
   model_version: string;
 }
 
@@ -134,7 +147,18 @@ async function getCandidateMeals(userId: any, excludeMealIds: Set<string>, limit
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function saveRecommendations(userId: any, recommendations: Array<{ meal_id: string; score: number; model_version: string }>): Promise<SavedRecommendation[]> {
+async function saveRecommendations(
+  userId: any,
+  recommendations: Array<{
+    recommendation_id: string;
+    request_id: string;
+    meal_id: string;
+    score: number;
+    model_version: string;
+    ml_user_id: number;
+    ml_recipe_id: number;
+  }>
+): Promise<SavedRecommendation[]> {
   if (recommendations.length === 0) return [];
   const client = await getClient(userId);
   try {
@@ -143,36 +167,88 @@ async function saveRecommendations(userId: any, recommendations: Array<{ meal_id
     await client.query(`
       CREATE TABLE IF NOT EXISTS recommendation_cache (
         id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        request_id    TEXT,
         user_id       TEXT NOT NULL,
-        meal_id       UUID NOT NULL,
+        meal_id       TEXT NOT NULL,
+        ml_user_id    INTEGER,
+        ml_recipe_id  INTEGER,
         score         DOUBLE PRECISION NOT NULL,
         model_version TEXT NOT NULL DEFAULT 'unknown',
         created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         expires_at    TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '1 day')
       )
     `);
+    await client.query(`ALTER TABLE recommendation_cache ADD COLUMN IF NOT EXISTS request_id TEXT`);
+    await client.query(`ALTER TABLE recommendation_cache ADD COLUMN IF NOT EXISTS ml_user_id INTEGER`);
+    await client.query(`ALTER TABLE recommendation_cache ADD COLUMN IF NOT EXISTS ml_recipe_id INTEGER`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_recommendation_cache_request ON recommendation_cache(request_id)`);
 
     const params: unknown[] = [];
     const valueClauses = recommendations.map((rec, i) => {
-      const base = i * 4;
-      params.push(userId, rec.meal_id, rec.score, rec.model_version);
-      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4})`;
+      const base = i * 8;
+      params.push(
+        rec.recommendation_id,
+        rec.request_id,
+        userId,
+        rec.meal_id,
+        rec.ml_user_id,
+        rec.ml_recipe_id,
+        rec.score,
+        rec.model_version
+      );
+      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8})`;
     });
 
     const result = await client.query(
-      `INSERT INTO recommendation_cache (user_id, meal_id, score, model_version)
+      `INSERT INTO recommendation_cache
+         (id, request_id, user_id, meal_id, ml_user_id, ml_recipe_id, score, model_version)
        VALUES ${valueClauses.join(', ')}
-       RETURNING id, meal_id, score, model_version`,
+       ON CONFLICT (id) DO UPDATE SET
+         request_id = EXCLUDED.request_id,
+         score = EXCLUDED.score,
+         model_version = EXCLUDED.model_version,
+         expires_at = NOW() + INTERVAL '1 day'
+       RETURNING id, request_id, meal_id, score, model_version, ml_user_id, ml_recipe_id`,
       params
     );
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return result.rows.map((r: any) => ({
       id: r.id,
+      request_id: r.request_id,
       meal_id: r.meal_id,
       score: Number(r.score),
       model_version: r.model_version,
+      ml_user_id: r.ml_user_id == null ? null : Number(r.ml_user_id),
+      ml_recipe_id: r.ml_recipe_id == null ? null : Number(r.ml_recipe_id),
     }));
+  } finally {
+    client.release();
+  }
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function getRecommendationForFeedback(userId: any, recommendationId: string): Promise<RecommendationFeedbackContext | null> {
+  const client = await getClient(userId);
+  try {
+    const result = await client.query(
+      `SELECT id, request_id, user_id, meal_id, ml_user_id, ml_recipe_id, model_version
+         FROM recommendation_cache
+        WHERE id = $1 AND user_id = $2
+        LIMIT 1`,
+      [recommendationId, userId]
+    );
+    if (result.rows.length === 0) return null;
+    const r = result.rows[0];
+    return {
+      recommendation_id: r.id,
+      request_id: r.request_id,
+      user_id: r.user_id,
+      meal_id: r.meal_id,
+      ml_user_id: r.ml_user_id == null ? null : Number(r.ml_user_id),
+      ml_recipe_id: r.ml_recipe_id == null ? null : Number(r.ml_recipe_id),
+      model_version: r.model_version,
+    };
   } finally {
     client.release();
   }
@@ -208,5 +284,6 @@ export default {
   getRecentlyLoggedMealIds,
   getCandidateMeals,
   saveRecommendations,
+  getRecommendationForFeedback,
   logInteraction,
 };

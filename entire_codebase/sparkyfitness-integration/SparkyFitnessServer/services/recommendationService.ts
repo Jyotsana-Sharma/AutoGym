@@ -88,11 +88,31 @@ function reasonForRecommendation(meal: MealCandidate, goals: UserGoals): string 
 interface MLInstance extends Record<string, number | string> {
   user_id: number;
   recipe_id: number;
+  recommendation_id: string;
 }
 
 interface MLResponse {
   predictions: Array<{ recipe_id: number | string; score: number }>;
   model_version?: string;
+}
+
+async function sendMLFeedback(payload: {
+  request_id: string;
+  recommendation_id: string;
+  user_id: number;
+  recipe_id: number;
+  action: string;
+}): Promise<void> {
+  const response = await fetch(`${ML_URL}/feedback`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new Error(`ML feedback ${response.status}: ${text.slice(0, 200)}`);
+  }
 }
 
 function stablePositiveInt(value: unknown): number {
@@ -131,28 +151,46 @@ async function getRecommendations(userId: any, limit: number, excludeRecentDays:
   }
 
   const mlUserId = stablePositiveInt(userId);
+  const requestId = `sf-${userId}-${Date.now()}`;
   const mealByMlId = new Map<number, MealCandidate>();
+  const recommendationIdByMealId = new Map<string, string>();
   const instances: MLInstance[] = candidates.map(meal => {
     const mlRecipeId = stablePositiveInt(meal.meal_id);
+    const recommendationId = randomUUID();
     mealByMlId.set(mlRecipeId, meal);
+    recommendationIdByMealId.set(meal.meal_id, recommendationId);
     return {
       user_id: mlUserId,
       recipe_id: mlRecipeId,
+      recommendation_id: recommendationId,
       ...buildFeatureVector(meal, goals),
     };
   });
 
   let mlResponse: MLResponse;
   try {
-    mlResponse = await callMLPredict(`sf-${userId}-${Date.now()}`, instances);
+    mlResponse = await callMLPredict(requestId, instances);
   } catch (err) {
     log('warn', '[RecommendationService] ML API unavailable, using fallback ranking', err);
     const fallback = [...candidates]
       .sort((a, b) => Math.abs((a.protein ?? 0) - goals.protein * 0.3) - Math.abs((b.protein ?? 0) - goals.protein * 0.3))
       .slice(0, limit);
+    const saved = await recommendationRepository.saveRecommendations(
+      userId,
+      fallback.map((m, idx) => ({
+        recommendation_id: recommendationIdByMealId.get(m.meal_id) ?? randomUUID(),
+        request_id: requestId,
+        meal_id: m.meal_id,
+        score: Math.max(0, 1 - idx / Math.max(fallback.length, 1)),
+        model_version: 'fallback',
+        ml_user_id: mlUserId,
+        ml_recipe_id: stablePositiveInt(m.meal_id),
+      }))
+    );
+    const savedById = new Map(saved.map(s => [s.meal_id, s]));
     return {
       recommendations: fallback.map(m => ({
-        recommendation_id: randomUUID(),
+        recommendation_id: savedById.get(m.meal_id)?.id ?? recommendationIdByMealId.get(m.meal_id) ?? randomUUID(),
         meal_id: m.meal_id,
         meal_name: m.meal_name,
         description: m.description,
@@ -177,7 +215,15 @@ async function getRecommendations(userId: any, limit: number, excludeRecentDays:
 
   const saved = await recommendationRepository.saveRecommendations(
     userId,
-    ranked.map(r => ({ meal_id: r.meal.meal_id, score: r.score, model_version: mlResponse.model_version ?? 'unknown' }))
+    ranked.map(r => ({
+      recommendation_id: recommendationIdByMealId.get(r.meal.meal_id) ?? randomUUID(),
+      request_id: requestId,
+      meal_id: r.meal.meal_id,
+      score: r.score,
+      model_version: mlResponse.model_version ?? 'unknown',
+      ml_user_id: mlUserId,
+      ml_recipe_id: Number(r.recipe_id),
+    }))
   );
 
   const savedById = new Map(saved.map(s => [s.meal_id, s]));
@@ -207,6 +253,24 @@ async function getRecommendations(userId: any, limit: number, excludeRecentDays:
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function recordFeedback(userId: any, recommendationId: string, action: string): Promise<void> {
   await recommendationRepository.logInteraction(userId, recommendationId, action);
+  const context = await recommendationRepository.getRecommendationForFeedback(userId, recommendationId);
+  if (!context?.request_id || context.ml_user_id == null || context.ml_recipe_id == null) {
+    log('warn', '[RecommendationService] Feedback saved locally but not forwarded to ML; missing context', {
+      recommendationId,
+    });
+    return;
+  }
+  try {
+    await sendMLFeedback({
+      request_id: context.request_id,
+      recommendation_id: recommendationId,
+      user_id: context.ml_user_id,
+      recipe_id: context.ml_recipe_id,
+      action,
+    });
+  } catch (err) {
+    log('warn', '[RecommendationService] ML feedback forwarding failed; local feedback was retained', err);
+  }
 }
 
 export default { getRecommendations, recordFeedback };

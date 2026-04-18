@@ -167,8 +167,10 @@ recommendation_interactions
 
 The ML serving API also logs prediction outputs and raw feature values to the
 ML PostgreSQL database. Those logs feed drift monitoring and retraining.
-App-side UI feedback is stored in the SparkyFitness database; joining it with
-ML-side logs requires a shared request or recommendation identifier.
+App-side UI feedback is stored in the SparkyFitness database and forwarded to
+the ML `/feedback` endpoint. The shared `request_id` and `recommendation_id`
+fields allow SparkyFitness `recommendation_interactions` to join with ML-side
+`prediction_log`, `user_feedback`, and `inference_features`.
 
 ---
 
@@ -180,12 +182,10 @@ the response reports `model_version: "fallback"`.
 
 ---
 
-## Known Extension Points
+## Optional Future Enhancements
 
 | Improvement | Where |
 |---|---|
-| Forward app feedback to ML `/feedback` | `recommendationService.recordFeedback()` |
 | Explicit dietary/allergen preferences | `buildFeatureVector()` and SparkyFitness profile tables |
 | PCA history embeddings from live app data | `recommendationService.ts` before `/predict` |
 | Meal-type slot filtering | Query params + candidate SQL filtering |
-| Per-version app feedback analysis | Add shared request/recommendation identifier to both DBs |

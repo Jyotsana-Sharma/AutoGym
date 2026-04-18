@@ -71,23 +71,30 @@ If you skip this step entirely, the system uses all defaults and works out of th
 
 ---
 
-## Scenario A — ML System Only (Recommended for Graders)
+## Scenario A — Full Bootstrap (Recommended for Graders)
 
-This starts the complete ML pipeline: PostgreSQL, MLflow, data generation, serving, monitoring, and drift detection.
+This starts the complete integrated pipeline: PostgreSQL, MLflow, SparkyFitness, data compilation, one-shot training, serving, monitoring, and drift detection.
 
 ### One Command
 
 ```bash
-docker compose --profile full up -d
+docker compose --profile pipeline up -d --build
 ```
 
 That's it. This single command:
 1. Builds all Docker images from the single multi-stage `Dockerfile`
 2. Starts PostgreSQL and MLflow, waits for them to be healthy
-3. Starts the data generator (populates synthetic user interactions)
-4. Starts the serving API (loads model from MLflow on startup)
-5. Starts the full monitoring stack (Prometheus, Grafana, Alertmanager)
-6. Starts the drift monitor (checks for feature drift every 5 minutes)
+3. Applies the SparkyFitness recommendation route/UI integration
+4. Runs one-shot data compilation and training/evaluation/registration jobs
+5. Starts the serving API, which loads the Production model from MLflow Registry
+6. Starts the monitoring stack (Prometheus + Grafana alerting)
+7. Starts the drift monitor (checks for feature drift every 5 minutes)
+
+After the first successful bootstrap, normal production startup should use:
+
+```bash
+docker compose --profile runtime up -d
+```
 
 ### Wait for Startup (~2–3 minutes on first run)
 
@@ -207,7 +214,22 @@ docker compose --profile pipeline up -d
 
 The `sparkyfitness-setup` container runs automatically first — no manual script needed. It runs `sparkyfitness-integration/apply_integration.py`, copies all integration patch files into the SparkyFitness source, patches `SparkyFitnessServer.ts` to register `/api/recommendations`, patches `Foods.tsx` to render `RecipeRecommendations`, and creates `SparkyFitness/.env`. Only after it exits successfully do `sparkyfitness-server` and `sparkyfitness-frontend` start.
 
-This starts 15 services in the correct order (batch-pipeline, trainer, and sparkyfitness-setup run once and exit; the app, serving, retraining, database, and monitoring services stay running at steady state):
+This starts 14 services in the correct order. `batch-pipeline`, `trainer`, and
+`sparkyfitness-setup` run once and exit; the app, serving, retraining, database,
+and monitoring services stay running at steady state.
+
+After the first successful bootstrap, you can restart or operate only the
+steady-state system with the smaller runtime profile:
+
+```bash
+docker compose --profile runtime up -d
+```
+
+The runtime profile starts 11 services and skips the one-shot containers
+`sparkyfitness-setup`, `batch-pipeline`, and `trainer`. Use the full `pipeline`
+profile again whenever you intentionally want to rebuild training data and
+train/register a fresh model from scratch. Normal runtime startup does not
+retrain; serving loads the current Production model from MLflow Registry.
 
 ```
 postgres + mlflow
@@ -219,7 +241,7 @@ trainer (XGBoost + fairness gate + MLflow)    sparkyfitness-db (healthy)
 sparky-serving  ←─────────────────────────┐  sparkyfitness-server ──────────────────────┘
 retrain-api                               │  sparkyfitness-frontend (port 3004)
 drift-monitor                             │  ML_RECOMMENDATION_URL=http://sparky-serving:8000
-prometheus + grafana + alertmanager       │  (both on sparky-net — talk by container name)
+prometheus + grafana alerting             │  (both on sparky-net — talk by container name)
           └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -255,7 +277,7 @@ The system ships with a pre-trained model. To run the full training pipeline you
 ### Option 1 — Direct training (blocking, shows all output)
 
 ```bash
-docker compose --profile retrain run --rm trainer
+docker compose run --rm trainer
 ```
 
 This runs the full pipeline:
@@ -291,10 +313,10 @@ If you want to populate the database with fresh synthetic user interactions befo
 
 ```bash
 # Run batch pipeline to compile training CSVs
-docker compose --profile retrain run --rm batch-pipeline
+docker compose run --rm batch-pipeline
 
 # Then train on the fresh data
-docker compose --profile retrain run --rm trainer
+docker compose run --rm trainer
 ```
 
 ---
@@ -308,6 +330,12 @@ docker compose --profile pipeline up -d
 That's it. Docker Compose executes the stages in strict order using `depends_on` with `condition: service_completed_successfully`:
 
 ```
+
+For normal steady-state restarts after bootstrap:
+
+```bash
+docker compose --profile runtime up -d
+```
 postgres + mlflow start and pass healthchecks
         ↓
 batch-pipeline runs (compiles train/val/test CSVs)
@@ -317,7 +345,7 @@ trainer runs (XGBoost + fairness gate + MLflow registration)
 serving starts (loads model, serves /predict /explain)
 retrain-api starts
 drift-monitor starts (checks for feature drift every 5 min)
-prometheus + grafana + alertmanager start
+prometheus + grafana start
 sparkyfitness-setup applies app integration, then SparkyFitness starts
 ```
 
@@ -366,7 +394,7 @@ docker compose logs <service-name>
 Another process is using a port. Either stop the conflicting process or override the port:
 ```bash
 # Override serving port to 8001
-SERVING_PORT=8001 docker compose --profile serving up -d
+SERVING_PORT=8001 docker compose --profile runtime up -d serving
 ```
 Or edit `docker-compose.yml` and change the left side of the port mapping (e.g., `"8001:8000"`).
 
@@ -389,7 +417,7 @@ docker logs sparky-serving --tail=50
 
 # The serving container loads the model from MLflow on startup.
 # If no model is registered yet, run training first:
-docker compose --profile retrain run --rm trainer
+docker compose run --rm trainer
 ```
 
 ### PostgreSQL connection refused
@@ -424,7 +452,6 @@ docker system prune -a --volumes
 | `sparky-drift-monitor` | — | KS-test on 19 features every 5 minutes |
 | `sparky-prometheus` | 9090 | Scrapes and stores metrics |
 | `sparky-grafana` | 3000 | Dashboards for latency, drift, training history |
-| `sparky-alertmanager` | 9093 | Routes alerts (high error rate, latency, drift) |
 | `sparky-postgres-exporter` | 9187 | Exports PostgreSQL metrics to Prometheus |
 | `sparkyfitness-setup` | — | Applies the recommendation route/UI integration (runs once then exits) |
 | `sparkyfitness-db` | — | SparkyFitness application database |
@@ -439,6 +466,8 @@ docker system prune -a --volumes
 |---|---|---|---|
 | `POSTGRES_PASSWORD` | `sparky_pass` | postgres, all services | Database password |
 | `GRAFANA_PASSWORD` | `sparky_admin` | grafana | Grafana admin password |
+| `ROLLBACK_WEBHOOK_TOKEN` | _(empty)_ | grafana, retrain-api | Bearer token required before Grafana alert rollback is enabled |
+| `ROLLBACK_ALERT_NAMES` | `HighErrorRate` | retrain-api | Comma-separated critical alert names allowed to trigger rollback |
 | `MLFLOW_TRACKING_URI` | `http://mlflow:5000` | trainer, serving | MLflow server address |
 | `NDCG_THRESHOLD` | `0.55` | trainer | Minimum NDCG@10 to register model |
 | `DRIFT_THRESHOLD` | `0.05` | drift-monitor | KS-test p-value threshold |
