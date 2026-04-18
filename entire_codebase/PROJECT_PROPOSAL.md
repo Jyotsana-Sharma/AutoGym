@@ -118,8 +118,8 @@ Generic recipe recommendation systems fail in two fundamental ways:
 │    Step 2: XGBoost LambdaRank training (rank:ndcg, NDCG@10)                    │
 │    Step 3: Log all params + artifacts to MLflow                                 │
 │    Step 3.5: SAFEGUARDING GATE                                                  │
-│      → fairness_checker.py: calorie distribution parity by dietary group        │
-│        (Cohen's d ≤ 0.5; fail → model NOT registered)                          │
+│      → fairness_checker.py: NDCG@10 parity by dietary group                    │
+│        (group NDCG ≥ 80% of overall; fail → model NOT registered)              │
 │      → explainability.py: SHAP TreeExplainer global importance                 │
 │        → logged as artifact to MLflow run                                       │
 │    Step 4: Quality gates (NDCG threshold + fairness gate)                       │
@@ -369,10 +369,11 @@ fairness_passed = fairness_result["overall_passed"]
 ```
 
 `fairness_checker.py` evaluates:
-- Score distribution across dietary groups (`user_vegetarian`, `user_vegan`, `user_gluten_free`, `user_dairy_free`, `user_low_sodium`, `user_low_fat`)
-- Uses **Cohen's d** — effect size between each dietary group and the general population
-- **Threshold**: Cohen's d ≤ 0.5 (medium effect size) for each group
-- Result logged to MLflow as `fairness_report.json` artifact
+- NDCG@10 across dietary groups (`user_vegetarian`, `user_vegan`, `user_gluten_free`, `user_dairy_free`, `user_low_sodium`, `user_low_fat`)
+- Uses group-level ranking quality, not raw score distribution, so the gate matches the recommendation task
+- **Threshold**: each sufficiently large group must have NDCG@10 at least 80% of the overall NDCG@10
+- Allergen safety: top-5 recommendations for restricted users must violate allergen restrictions at <1%
+- Result logged to MLflow as `fairness_results.json` artifact
 
 If `fairness_passed = False`, the model is **not registered** to the MLflow Registry. The training job exits with a non-zero code, GitHub Actions marks the step failed, and no promotion occurs.
 
@@ -382,7 +383,7 @@ If `fairness_passed = False`, the model is **not registered** to the MLflow Regi
 # Also in Step 3.5, after fairness check:
 explainer = Explainer(booster, feature_columns=feature_cols)
 global_importance = explainer.get_global_importance(test_df[feature_cols])
-mlflow.log_dict(global_importance, "shap_global_importance.json")
+mlflow.log_dict(global_importance, "explainability/global_feature_importance.json")
 ```
 
 `explainability.py` uses `shap.TreeExplainer` to compute:
@@ -402,10 +403,10 @@ Three gates must all pass before a model is registered:
 | Gate | Check | Threshold |
 |---|---|---|
 | Gate 1: Performance | `NDCG@10 ≥ NDCG_THRESHOLD` | 0.55 (configurable) |
-| Gate 2: Overfit | `test_loss ≤ val_loss × 1.1` | Max 10% degradation |
-| Gate 3: Fairness | `fairness_passed = True` | Cohen's d ≤ 0.5 per group |
+| Gate 2: Production regression | `ndcg_at_10 >= production_ndcg - IMPROVEMENT_THRESHOLD` | Max 0.01 regression |
+| Gate 3: Fairness | `fairness_passed = True` | Group NDCG ≥ 80% of overall + allergen safety <1% |
 
-Gate results are logged as `gate_results.json` artifact to the MLflow run for full auditability.
+Gate results are logged as `quality_gate_results.json` artifact to the MLflow run for full auditability.
 
 On passing all gates:
 1. Model registered to MLflow Registry as `Staging`
@@ -599,12 +600,12 @@ The safeguarding plan is fully wired into the production system — not document
 
 **Implementation** (`safeguarding/fairness_checker.py`):
 - After every training run (Step 3.5), the trained model's predictions on the held-out test set are analyzed across dietary groups: vegetarian, vegan, gluten-free, dairy-free, low-sodium, low-fat users
-- **Cohen's d** measures the effect size between each group's score distribution and the overall population
-- **Hard gate**: If any group has Cohen's d > 0.5, `fairness_passed = False` → the model is rejected and **not registered** to MLflow
-- Result logged as `fairness_report.json` artifact in every MLflow training run
+- **Group NDCG@10** measures whether each dietary group receives comparable ranking quality
+- **Hard gate**: If any sufficiently large group falls more than 20% below overall NDCG@10, or allergen safety fails, `fairness_passed = False` → the model is rejected and **not registered** to MLflow
+- Result logged as `fairness_results.json` artifact in every MLflow training run
 - Gate 3 in `model_registry.py` explicitly blocks registration on fairness failure
 
-**Why Cohen's d**: Unlike statistical tests (which flag trivially small differences in large samples), Cohen's d measures practical significance. A score of 0.5 represents a "medium" effect — large enough to constitute meaningful unfairness in recommendation quality.
+**Why group NDCG@10**: The model is a ranker, so the fairness gate evaluates the same user-facing outcome as the primary model metric: whether relevant meals appear near the top for each dietary group.
 
 ### 5.2 Explainability
 
@@ -614,7 +615,7 @@ The safeguarding plan is fully wired into the production system — not document
 
 **Training-time** (global):
 - SHAP `TreeExplainer` computes mean |SHAP values| across the test set
-- Result stored as `shap_global_importance.json` artifact in every MLflow run
+- Result stored as `explainability/global_feature_importance.json` artifact in every MLflow run
 - Enables audit of which features drive the model's decisions globally
 
 **Serving-time** (per-instance):
@@ -639,7 +640,7 @@ The safeguarding plan is fully wired into the production system — not document
 **Implementation**:
 - Every training run is fully logged to MLflow: all hyperparameters (flattened YAML), NDCG@10, fairness result, SHAP importances, config file, manifest hash
 - `manifest.json` pins the exact dataset used (SHA-256 + git commit) — any past training run can be reproduced exactly
-- Gate results (`gate_results.json`) logged as artifact — any model in the registry has a full audit trail
+- Gate results (`quality_gate_results.json`) logged as artifact — any model in the registry has a full audit trail
 - Prometheus metrics expose inference volume, latency, and error rates at `/metrics`
 - Grafana dashboards make drift trends, retraining history, and serving performance visible to operators
 - `drift_log` PostgreSQL table records every KS-test result with timestamp
@@ -672,7 +673,7 @@ def cleanup_old_inference_features(conn, retention_days: int = 90) -> int:
 
 **Implementation**:
 - **MLflow Registry**: Every model version has a state machine (None → Staging → Production → Archived). Transitions are timestamped and attributed.
-- **Gate results artifact**: Every registered model has `gate_results.json` containing all three gate verdicts (NDCG, overfit, fairness).
+- **Gate results artifact**: Every registered model has `quality_gate_results.json` containing all three gate verdicts (NDCG threshold, production-regression check, fairness).
 - **Retraining triggers**: `drift_monitor.py` logs the reason for every retraining trigger (`drift_detected: [feature_list]`). GitHub Actions logs every workflow run with trigger reason.
 - **`retrain-api` (port 8080)**: All retraining requests go through this API — creates an audit trail of who/what triggered retraining and when.
 - **`rollback_model.py`**: Rollback events are explicit MLflow stage transitions, visible in the registry history.
@@ -1021,8 +1022,8 @@ Final NDCG@10 = mean(NDCG@10 per user)
 | Gate | Metric | Threshold | Current Value |
 |---|---|---|---|
 | Performance | NDCG@10 | ≥ 0.55 | **0.8148** |
-| Overfit | test_loss / val_loss | ≤ 1.10 | Within bounds |
-| Fairness | Cohen's d (dietary groups) | ≤ 0.5 | Within bounds |
+| Production regression | New NDCG vs. current Production | No regression > 0.01 | Within bounds |
+| Fairness | Dietary group NDCG@10 + allergen safety | Group NDCG ≥ 80% of overall; allergen violations <1% | Within bounds |
 
 ### Latency Targets
 
@@ -1070,9 +1071,9 @@ Full provenance chain for any trained model:
 ```
 model artifact
     → MLflow run_id
-    → gate_results.json (NDCG, overfit, fairness verdicts)
-    → shap_global_importance.json (feature importance snapshot)
-    → fairness_report.json (per-group Cohen's d values)
+    → quality_gate_results.json (NDCG, production-regression, fairness verdicts)
+    → explainability/global_feature_importance.json (feature importance snapshot)
+    → fairness_results.json (per-group NDCG@10 + allergen safety)
     → manifest.json
     → train.sha256 + val.sha256 + test.sha256
     → batch_pipeline Git commit hash
@@ -1088,9 +1089,9 @@ Given any registered model, the exact dataset, code, and hyperparameters used to
 ### Joint Deliverables (12/15 points) — COMPLETED
 
 - [x] **End-to-end automated workflow**: Data generation → batch compilation → training → fairness gate → MLflow registration → serving hot-reload → drift monitoring → retraining webhook. Runs via GitHub Actions and docker-compose without manual SSH intervention.
-- [x] **Production deployment on Chameleon Cloud**: All 12 containers deployed on KVM@TACC VM. Accessible at the VM's floating IP. Described in `CHAMELEON_DEPLOYMENT.md`.
+- [x] **Production deployment on Chameleon Cloud**: Unified Docker Compose deployment on a KVM@TACC VM. Accessible at the VM's floating IP. Described in `CHAMELEON_DEPLOYMENT.md`.
 - [x] **SparkyFitness integration**: ML recommendations wired into the SparkyFitness regular user flow via `ML_RECOMMENDATION_URL` and shared `sparky-net` Docker network. Calling `POST /predict` for every recipe recommendation in the app.
-- [x] **Safeguarding plan implemented within the system**: Fairness gate (Cohen's d, blocking), SHAP explainability (training artifact + `/explain` endpoint), 90-day privacy retention, MLflow audit trail, Prometheus/Grafana transparency, KS-test robustness. All 6 principles have concrete code mechanisms. See [Section 5](#5-safeguarding-plan).
+- [x] **Safeguarding plan implemented within the system**: Fairness gate (group NDCG@10 + allergen safety, blocking), SHAP explainability (training artifact + `/explain` endpoint), 90-day privacy retention, MLflow audit trail, Prometheus/Grafana transparency, KS-test robustness. All 6 principles have concrete code mechanisms. See [Section 5](#5-safeguarding-plan).
 - [x] **Minimal human intervention**: Promotions happen via MLflow Registry API transitions detected by the serving layer's hot-reload loop. Rollbacks triggered automatically by GitHub Actions on CI failure. Manual approval available but not required.
 
 ### Data Team Deliverables (3/15 points) — COMPLETED
@@ -1107,9 +1108,9 @@ Given any registered model, the exact dataset, code, and hyperparameters used to
 - [x] **XGBoost LambdaRank model** (`retrain_pipeline.py`): `rank:ndcg` objective, NDCG@10 = 0.8148, 47-feature vector, early stopping
 - [x] **MLflow experiment tracking**: All params + metrics + artifacts logged per run; model registry with Staging/Production/Archived stages
 - [x] **Automated retraining pipeline**: `retrain_pipeline.py` triggered by: CI/CD push, weekly cron, drift webhook (POST to `retrain-api`)
-- [x] **Fairness gate wired into training** (Step 3.5): Cohen's d per dietary group, hard blocker on registration if fairness_passed = False
-- [x] **SHAP explainability at training time**: `shap_global_importance.json` artifact logged to every MLflow run
-- [x] **Quality gates**: 3-gate system (NDCG threshold + overfit check + fairness) before MLflow registration
+- [x] **Fairness gate wired into training** (Step 3.5): per-group NDCG@10 and allergen safety, hard blocker on registration if fairness_passed = False
+- [x] **SHAP explainability at training time**: `explainability/global_feature_importance.json` artifact logged to every MLflow run
+- [x] **Quality gates**: 3-gate system (NDCG threshold + production-regression check + fairness) before MLflow registration
 - [x] **Auto-promote and rollback**: GitHub Actions Stage 3 (promote) + Stage 4 (rollback on failure)
 - [x] **YAML-driven hyperparameter config** (`configs/training/xgb_ranker.yaml`): Structured, version-controlled config
 

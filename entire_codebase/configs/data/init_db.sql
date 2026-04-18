@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS user_interactions (
     recipe_id   INTEGER NOT NULL,
     rating      SMALLINT CHECK (rating BETWEEN 0 AND 5),
     action      VARCHAR(20) DEFAULT 'view'
-                CHECK (action IN ('view','cook','rate','skip')),
+                CHECK (action IN ('view','cook','rate','skip','served','logged','dismissed','saved')),
     created_at  TIMESTAMPTZ DEFAULT NOW()
 );
 

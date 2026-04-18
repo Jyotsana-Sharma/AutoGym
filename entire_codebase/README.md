@@ -22,7 +22,7 @@ A unified ML project: data → features → training → evaluation → registry
 │   ├── serving/                   ← Inference API
 │   │   ├── app_production.py      ← FastAPI: MLflow Registry load + hot-reload + logging
 │   │   ├── model_loader.py        ← MLflow loader with local fallback
-│   │   └── prediction_logger.py   ← Async predictions → PostgreSQL (feedback loop)
+│   │   └── prediction_logger.py   ← Async predictions/features/feedback → PostgreSQL
 │   └── data/                      ← Data pipeline
 │       ├── build_training_table.py← Feature engineering (cuisine, allergens, PCA)
 │       ├── batch_pipeline.py      ← Merge prod interactions + compile training splits
@@ -44,11 +44,8 @@ A unified ML project: data → features → training → evaluation → registry
 │       ├── init_feedback.sql      ← Feedback tables (prediction_log, drift_log, ...)
 │       └── soda_checks.yml        ← Soda data quality rules
 │
-├── docker/                        ← All Dockerfiles in one place
-│   ├── Dockerfile.training        ← Training + retraining API container
-│   ├── Dockerfile.serving         ← FastAPI serving container
-│   ├── Dockerfile.data            ← Data pipeline container
-│   └── Dockerfile.mlflow          ← MLflow tracking server
+├── Dockerfile                     ← Single multi-stage image: data/training/serving/mlflow
+├── docker/                        ← Legacy per-role Dockerfiles retained for reference
 │
 ├── requirements/                  ← Per-role Python dependencies
 │   ├── training.txt
@@ -58,7 +55,7 @@ A unified ML project: data → features → training → evaluation → registry
 ├── monitoring/                    ← Shared observability stack
 │   ├── prometheus.yml             ← Scrape configs (serving, postgres, mlflow)
 │   ├── alert_rules.yml            ← Alerts: latency, errors, drift, model staleness
-│   ├── alertmanager.yml           ← Alert routing + auto-rollback webhook
+│   ├── alertmanager.yml           ← Alert routing configuration
 │   └── grafana/
 │       ├── dashboards/ml_system.json ← Pre-built ML system dashboard
 │       └── provisioning/          ← Auto-provisioned datasources + dashboard pointers
@@ -75,7 +72,13 @@ A unified ML project: data → features → training → evaluation → registry
 ├── scripts/                       ← Operational + dev utilities
 │   ├── smoke_test.py              ← CI smoke test (health + prediction + latency SLA)
 │   ├── benchmark.py               ← Load testing + latency profiling
-│   └── convert_to_onnx.py         ← XGBoost → ONNX format conversion (optional)
+│   ├── convert_to_onnx.py         ← XGBoost → ONNX format conversion (optional)
+│   └── setup-sparkyfitness.sh     ← Local helper to apply the SparkyFitness integration
+│
+├── sparkyfitness-integration/     ← Patch set applied to SparkyFitness by setup container
+│   ├── apply_integration.py       ← Idempotent route/UI patcher used by docker-compose
+│   ├── SparkyFitnessServer/       ← recommendation route/service/repository/schema
+│   └── SparkyFitnessFrontend/     ← recommendation API hook + Foods page component
 │
 ├── data/                          ← Raw source data (Kaggle Food.com)
 │   ├── RAW_recipes.csv
@@ -116,7 +119,7 @@ A unified ML project: data → features → training → evaluation → registry
 │                loop             └───────────────────────┘           │
 │                                                                      │
 │  configs/training/*.yaml   configs/data/*.sql   configs/serving/     │
-│  docker/Dockerfile.*       monitoring/           safeguarding/       │
+│  Dockerfile                monitoring/           safeguarding/       │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -146,8 +149,8 @@ make smoke-test
 # 7. Start full monitoring stack
 make run-monitoring
 
-# --- Or, start everything at once ---
-make run-all
+# --- Or, start the complete ML + SparkyFitness stack ---
+docker compose --profile pipeline up -d
 ```
 
 ---
@@ -173,12 +176,17 @@ make run-all
 
 5. SERVING  →  src/serving/app_production.py
                /predict → XGBoost inference → ranked recipes
-               /feedback → user ratings → PostgreSQL
+               /feedback → user ratings/actions → PostgreSQL user_feedback + user_interactions
                /explain → SHAP feature attributions
 
 6. MONITORING + LOOP
                drift_monitor.py: KS test every 5 min → POST /trigger on drift
-               Prometheus alerts on degradation → auto-rollback
+               CI smoke-test failure → automated rollback
+
+7. SPARKYFITNESS APP FLOW
+               Foods page → /api/recommendations → ML /predict
+               UI actions → recommendation_interactions in SparkyFitness DB
+               Serving requests/features → ML PostgreSQL for drift and retraining
 ```
 
 ---
@@ -193,6 +201,7 @@ make run-all
 | Alert rules | `monitoring/alert_rules.yml` |
 | Serving behaviour | `configs/serving/serving.yaml` |
 | DB schema | `configs/data/init_db.sql` + `init_feedback.sql` |
+| SparkyFitness integration patcher | `sparkyfitness-integration/apply_integration.py` |
 
 ---
 
@@ -216,7 +225,9 @@ curl -X POST http://localhost:8080/rollback \
   -H "Content-Type: application/json" -d '{"version":"3"}'
 ```
 
-Automated rollback fires when Prometheus alerts `LowPredictionScores` or `HighErrorRate`.
+Automated rollback is implemented in CI after a failed post-promotion smoke test.
+Prometheus and Alertmanager provide monitoring signals, but alert-driven rollback
+still needs an alert-handling endpoint wired into `retrain_api.py`.
 
 ---
 
@@ -226,6 +237,6 @@ See [safeguarding/SAFEGUARDING_PLAN.md](safeguarding/SAFEGUARDING_PLAN.md):
 - **Fairness** — per-group NDCG@10 gate (±20%), allergen safety
 - **Explainability** — SHAP attributions per prediction
 - **Transparency** — model version + source in every response, full MLflow lineage
-- **Privacy** — pseudonymized IDs, no PII in artifacts, 90-day feature retention
-- **Accountability** — retraining log, GitHub environment approval gates, rollback trail
-- **Robustness** — drift monitoring, auto-rollback, local model fallback
+- **Privacy** — pseudonymized ML IDs, no PII in artifacts, 90-day inference feature retention
+- **Accountability** — retraining metrics/logs, GitHub environment approval gates, rollback trail
+- **Robustness** — drift monitoring, CI rollback after failed promotion, local model fallback

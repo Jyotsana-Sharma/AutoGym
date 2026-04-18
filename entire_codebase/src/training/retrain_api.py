@@ -21,7 +21,8 @@ import threading
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Response
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_latest
 from pydantic import BaseModel
 import uvicorn
 
@@ -33,6 +34,24 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="SparkyFitness Retrain API", version="1.0.0")
 
+retrain_jobs_total = Counter(
+    "sparky_retrain_jobs_total",
+    "Total retraining jobs by status and trigger reason",
+    ["status", "reason"],
+)
+retrain_failures_total = Counter(
+    "sparky_retrain_failures_total",
+    "Total retraining jobs that failed",
+)
+last_retrain_timestamp = Gauge(
+    "sparky_last_retrain_timestamp_seconds",
+    "Unix timestamp of the most recent completed successful retraining job",
+)
+retrain_job_running = Gauge(
+    "sparky_retrain_job_running",
+    "1 when a retraining job is running, otherwise 0",
+)
+
 # ---------------------------------------------------------------------------
 # In-memory job state (sufficient for single-node; swap with Redis for HA)
 # ---------------------------------------------------------------------------
@@ -41,7 +60,7 @@ _current_job: dict[str, Any] = {"status": "idle", "result": None, "triggered_at"
 
 
 class TriggerRequest(BaseModel):
-    config: str = "configs/train/xgb_ranker.yaml"
+    config: str = "configs/training/xgb_ranker.yaml"
     train_csv: str | None = None
     val_csv: str | None = None
     test_csv: str | None = None
@@ -73,11 +92,21 @@ def _run_job(req: TriggerRequest):
         with _job_lock:
             _current_job["status"] = "completed" if result["success"] else "failed"
             _current_job["result"] = result
+        status = "completed" if result["success"] else "failed"
+        retrain_jobs_total.labels(status=status, reason=req.reason).inc()
+        retrain_job_running.set(0)
+        if result["success"]:
+            last_retrain_timestamp.set(datetime.now(timezone.utc).timestamp())
+        else:
+            retrain_failures_total.inc()
     except Exception as exc:
         logger.exception("Retraining job crashed: %s", exc)
         with _job_lock:
             _current_job["status"] = "failed"
             _current_job["result"] = {"error": str(exc)}
+        retrain_jobs_total.labels(status="failed", reason=req.reason).inc()
+        retrain_failures_total.inc()
+        retrain_job_running.set(0)
 
 
 @app.post("/trigger")
@@ -90,6 +119,8 @@ def trigger_retrain(req: TriggerRequest, background_tasks: BackgroundTasks):
         _current_job["reason"] = req.reason
         _current_job["result"] = None
 
+    retrain_jobs_total.labels(status="started", reason=req.reason).inc()
+    retrain_job_running.set(1)
     background_tasks.add_task(_run_job, req)
     return {
         "accepted": True,
@@ -131,6 +162,11 @@ def production_model_info():
 @app.get("/health")
 def health():
     return {"status": "healthy", "job_status": _current_job["status"]}
+
+
+@app.get("/metrics")
+def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 if __name__ == "__main__":

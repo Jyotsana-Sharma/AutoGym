@@ -302,80 +302,30 @@ ls ~/sparky-ml
 
 ---
 
-### Step 12 — Clone SparkyFitness and apply the recommendation feature
+### Step 12 — Clone SparkyFitness only if you are using the upstream app repo
 
-The integration files are **already on the VM** at
+The recommendation integration files are **already on the VM** at
 `~/AutoGym/entire_codebase/sparkyfitness-integration/` (cloned in Step 11).
-No fork, no rsync from your laptop needed.
+Use this step only if your deployment still depends on the upstream
+`CodeWithCJ/SparkyFitness` repository.
+
+If you already maintain a fully integrated SparkyFitness application repo,
+skip this step and deploy that app directly instead.
 
 ```bash
 # 1. Clone the upstream SparkyFitness app
 git clone https://github.com/CodeWithCJ/SparkyFitness.git ~/SparkyFitness
 
-# Convenience variables
-INTEG=~/AutoGym/entire_codebase/sparkyfitness-integration
-SF=~/SparkyFitness
+# 2. Apply the integration patch idempotently
+APP_DIR=~/SparkyFitness \
+INTEGRATION_DIR=~/AutoGym/entire_codebase/sparkyfitness-integration \
+ENV_EXAMPLE=~/AutoGym/entire_codebase/.env.sparky.example \
+python3 ~/AutoGym/entire_codebase/sparkyfitness-integration/apply_integration.py
 
-# 2. Copy backend integration files
-mkdir -p $SF/SparkyFitnessServer/schemas \
-         $SF/SparkyFitnessServer/models \
-         $SF/SparkyFitnessServer/services \
-         $SF/SparkyFitnessServer/routes \
-         $SF/SparkyFitnessServer/db
-
-cp $INTEG/SparkyFitnessServer/schemas/recommendationSchemas.ts \
-   $SF/SparkyFitnessServer/schemas/
-
-cp $INTEG/SparkyFitnessServer/models/recommendationRepository.ts \
-   $SF/SparkyFitnessServer/models/
-
-cp $INTEG/SparkyFitnessServer/services/recommendationService.ts \
-   $SF/SparkyFitnessServer/services/
-
-cp $INTEG/SparkyFitnessServer/routes/recommendationRoutes.ts \
-   $SF/SparkyFitnessServer/routes/
-
-cp $INTEG/SparkyFitnessServer/db/add_recommendations.sql \
-   $SF/SparkyFitnessServer/db/
-
-# 3. Copy frontend integration files
-mkdir -p $SF/SparkyFitnessFrontend/src/api \
-         $SF/SparkyFitnessFrontend/src/hooks/Foods \
-         $SF/SparkyFitnessFrontend/src/pages/Foods
-
-cp $INTEG/SparkyFitnessFrontend/src/api/recommendations.ts \
-   $SF/SparkyFitnessFrontend/src/api/
-
-cp $INTEG/SparkyFitnessFrontend/src/hooks/Foods/useRecommendations.ts \
-   $SF/SparkyFitnessFrontend/src/hooks/Foods/
-
-cp $INTEG/SparkyFitnessFrontend/src/pages/Foods/RecipeRecommendations.tsx \
-   $SF/SparkyFitnessFrontend/src/pages/Foods/
-
-# 4. Wire the route into SparkyFitnessServer.ts
-# (guarded — upstream repo may already have these lines)
-grep -q "recommendationRoutes" $SF/SparkyFitnessServer/SparkyFitnessServer.ts || \
-  sed -i "s|import foodRoutes from './routes/foodRoutes.js';|import foodRoutes from './routes/foodRoutes.js';\nimport recommendationRoutes from './routes/recommendationRoutes.js';|" \
-      $SF/SparkyFitnessServer/SparkyFitnessServer.ts
-
-grep -q "api/recommendations" $SF/SparkyFitnessServer/SparkyFitnessServer.ts || \
-  sed -i "s|app.use('/api/foods', foodRoutes);|app.use('/api/foods', foodRoutes);\napp.use('/api/recommendations', recommendationRoutes);|" \
-      $SF/SparkyFitnessServer/SparkyFitnessServer.ts
-
-# 5. Wire the RecipeRecommendations panel into the Foods page
-# (guarded — upstream repo may already have these lines)
-grep -q "RecipeRecommendations" $SF/SparkyFitnessFrontend/src/pages/Foods/Foods.tsx || \
-  sed -i "s|import MealManagement|import RecipeRecommendations from './RecipeRecommendations';\nimport MealManagement|" \
-      $SF/SparkyFitnessFrontend/src/pages/Foods/Foods.tsx
-
-grep -q "RecipeRecommendations" $SF/SparkyFitnessFrontend/src/pages/Foods/Foods.tsx || \
-  sed -i "s|<MealManagement|<Card>\n          <CardContent className=\"pt-6\">\n            <RecipeRecommendations limit={6} \/>\n          <\/CardContent>\n        <\/Card>\n        <MealManagement|" \
-      $SF/SparkyFitnessFrontend/src/pages/Foods/Foods.tsx
-
-# 6. Verify the edits landed correctly
+# 3. Verify the edits landed correctly
 grep -n "recommendationRoutes\|RecipeRecommendations" \
-    $SF/SparkyFitnessServer/SparkyFitnessServer.ts \
-    $SF/SparkyFitnessFrontend/src/pages/Foods/Foods.tsx
+    ~/SparkyFitness/SparkyFitnessServer/SparkyFitnessServer.ts \
+    ~/SparkyFitness/SparkyFitnessFrontend/src/pages/Foods/Foods.tsx
 ```
 
 You should see two matching lines in each file — the import and the usage.
@@ -383,14 +333,14 @@ You should see two matching lines in each file — the import and the usage.
 > **Important:** The upstream `CodeWithCJ/SparkyFitness` repository already contains
 > broken stub versions of `recommendationRoutes.ts`, `recommendationService.ts`, and
 > `recommendationRepository.ts` (class-based implementations with no `export default`).
-> The `cp` commands above **must run** to overwrite them with the correct versions.
+> The setup script copies the correct integration files over any upstream stubs.
 > If you skip this step or clone SparkyFitness after a repo update that changes these
 > files, the server will crash-loop with:
 > ```
 > SyntaxError: The requested module './routes/recommendationRoutes.js'
 >   does not provide an export named 'default'
 > ```
-> Fix: re-run all `cp` commands from step 3 of this section, then rebuild.
+> Fix: re-run `apply_integration.py`, then rebuild.
 
 ---
 
@@ -527,9 +477,14 @@ Save with `Ctrl+O`, exit with `Ctrl+X`.
 
 ### Step 15 — Configure SparkyFitness `.env`
 
+For the current integrated deliverable, SparkyFitness is started from the same
+`~/sparky-ml/docker-compose.yml` file as the ML system. Add the SparkyFitness
+values to `~/sparky-ml/.env`; you do not need a separate
+`~/SparkyFitness/docker/.env` unless you intentionally deploy the upstream app
+with its own Compose file.
+
 ```bash
-cd ~/SparkyFitness/docker
-cp .env.example .env
+cd ~/sparky-ml
 nano .env
 ```
 
@@ -559,7 +514,8 @@ SPARKY_FITNESS_API_ENCRYPTION_KEY=paste_32_char_random_string_here
 BETTER_AUTH_SECRET=paste_another_32_char_random_string_here
 
 # ── ML Recommendation feature ────────────────────────────────────────────────
-ML_RECOMMENDATION_URL=http://YOUR_IP:8000
+# Inside Docker Compose, the app reaches ML serving by service name.
+ML_RECOMMENDATION_URL=http://sparky-serving:8000
 ML_MODEL_NAME=sparky-ranker
 
 # ── Optional — leave blank to disable these features ────────────────────────
@@ -585,11 +541,57 @@ openssl rand -hex 32
 
 Save with `Ctrl+O`, exit with `Ctrl+X`.
 
+> The `sparkyfitness-setup` service also creates `SparkyFitness/.env` from
+> `.env.sparky.example` if that file is missing, so the application source tree
+> has a local env file for development.
+
 ---
 
-## Phase 8 — Start the ML System
+## Phase 8 — Start the Unified ML + SparkyFitness System
 
-### Step 16 — Build all Docker images
+### Step 16 — Start the complete integrated stack
+
+This is the preferred path for the milestone submission. It builds the ML
+images, applies the SparkyFitness recommendation integration, compiles data,
+trains/registers a model, starts serving, and starts monitoring.
+
+```bash
+cd ~/sparky-ml
+docker compose --profile pipeline up -d --build
+docker compose --profile pipeline ps
+```
+
+The `sparkyfitness-setup` container runs `apply_integration.py` automatically,
+then exits successfully. The server and frontend start only after that patch
+step completes.
+
+Verify:
+
+```bash
+curl http://localhost:8000/health
+curl http://localhost:8080/health
+docker compose --profile pipeline ps
+```
+
+Open:
+
+| Service | URL |
+|---|---|
+| SparkyFitness UI | `http://YOUR_IP:3004` |
+| ML serving health/docs | `http://YOUR_IP:8000/health`, `http://YOUR_IP:8000/docs` |
+| MLflow | `http://YOUR_IP:5000` |
+| Prometheus | `http://YOUR_IP:9090` |
+| Grafana | `http://YOUR_IP:3000` |
+
+The detailed step-by-step commands below remain useful for debugging individual
+parts of the system, but the integrated deployment should use the single
+Compose profile above.
+
+---
+
+## Phase 8B — Debugging the ML System Separately
+
+### Step 16B — Build all Docker images
 
 The ML system uses a **single multi-stage `Dockerfile`** (in the repo root).
 One file, four named stages — `data`, `training`, `serving`, `mlflow`.
@@ -915,7 +917,13 @@ Privacy retention: deleted 0 inference_features rows older than 90 days
 
 ---
 
-## Phase 9 — Start SparkyFitness
+## Phase 9 — Legacy Separate SparkyFitness Startup
+
+Use this section only if you intentionally deployed SparkyFitness from a
+separate `~/SparkyFitness/docker` Compose project. The milestone deployment
+uses the unified `docker compose --profile pipeline up -d --build` command from
+`~/sparky-ml`, which starts SparkyFitness and the ML services on shared Compose
+networks without manual `docker network connect`.
 
 ### Step 27 — Create the build override file
 
@@ -1123,45 +1131,14 @@ ln -s ~/AutoGym/entire_codebase ~/sparky-ml
 # Clone upstream SparkyFitness and apply the recommendation feature
 git clone https://github.com/CodeWithCJ/SparkyFitness.git ~/SparkyFitness
 
-INTEG=~/AutoGym/entire_codebase/sparkyfitness-integration
-SF=~/SparkyFitness
+APP_DIR=~/SparkyFitness \
+INTEGRATION_DIR=~/AutoGym/entire_codebase/sparkyfitness-integration \
+ENV_EXAMPLE=~/AutoGym/entire_codebase/.env.sparky.example \
+python3 ~/AutoGym/entire_codebase/sparkyfitness-integration/apply_integration.py
 
-mkdir -p $SF/SparkyFitnessServer/schemas $SF/SparkyFitnessServer/models \
-         $SF/SparkyFitnessServer/services $SF/SparkyFitnessServer/routes \
-         $SF/SparkyFitnessServer/db $SF/SparkyFitnessFrontend/src/api \
-         $SF/SparkyFitnessFrontend/src/hooks/Foods \
-         $SF/SparkyFitnessFrontend/src/pages/Foods
-
-cp $INTEG/SparkyFitnessServer/schemas/recommendationSchemas.ts   $SF/SparkyFitnessServer/schemas/
-cp $INTEG/SparkyFitnessServer/models/recommendationRepository.ts $SF/SparkyFitnessServer/models/
-cp $INTEG/SparkyFitnessServer/services/recommendationService.ts  $SF/SparkyFitnessServer/services/
-cp $INTEG/SparkyFitnessServer/routes/recommendationRoutes.ts     $SF/SparkyFitnessServer/routes/
-cp $INTEG/SparkyFitnessServer/db/add_recommendations.sql         $SF/SparkyFitnessServer/db/
-cp $INTEG/SparkyFitnessFrontend/src/api/recommendations.ts       $SF/SparkyFitnessFrontend/src/api/
-cp $INTEG/SparkyFitnessFrontend/src/hooks/Foods/useRecommendations.ts \
-   $SF/SparkyFitnessFrontend/src/hooks/Foods/
-cp $INTEG/SparkyFitnessFrontend/src/pages/Foods/RecipeRecommendations.tsx \
-   $SF/SparkyFitnessFrontend/src/pages/Foods/
-
-grep -q "recommendationRoutes" $SF/SparkyFitnessServer/SparkyFitnessServer.ts || \
-  sed -i "s|import foodRoutes from './routes/foodRoutes.js';|import foodRoutes from './routes/foodRoutes.js';\nimport recommendationRoutes from './routes/recommendationRoutes.js';|" \
-      $SF/SparkyFitnessServer/SparkyFitnessServer.ts
-grep -q "api/recommendations" $SF/SparkyFitnessServer/SparkyFitnessServer.ts || \
-  sed -i "s|app.use('/api/foods', foodRoutes);|app.use('/api/foods', foodRoutes);\napp.use('/api/recommendations', recommendationRoutes);|" \
-      $SF/SparkyFitnessServer/SparkyFitnessServer.ts
-grep -q "RecipeRecommendations" $SF/SparkyFitnessFrontend/src/pages/Foods/Foods.tsx || \
-  sed -i "s|import MealManagement|import RecipeRecommendations from './RecipeRecommendations';\nimport MealManagement|" \
-      $SF/SparkyFitnessFrontend/src/pages/Foods/Foods.tsx
-grep -q "RecipeRecommendations" $SF/SparkyFitnessFrontend/src/pages/Foods/Foods.tsx || \
-  sed -i "s|<MealManagement|<Card>\n          <CardContent className=\"pt-6\">\n            <RecipeRecommendations limit={6} \/>\n          <\/CardContent>\n        <\/Card>\n        <MealManagement|" \
-      $SF/SparkyFitnessFrontend/src/pages/Foods/Foods.tsx
-
-# 2. Configure .env files with the NEW floating IP
+# 2. Configure .env with the NEW floating IP
 cp ~/sparky-ml/.env.example ~/sparky-ml/.env
-nano ~/sparky-ml/.env          # update YOUR_IP and credentials
-
-cp ~/SparkyFitness/docker/.env.example ~/SparkyFitness/docker/.env
-nano ~/SparkyFitness/docker/.env   # update YOUR_IP and credentials
+nano ~/sparky-ml/.env          # update YOUR_IP, Chameleon credentials, and SparkyFitness secrets
 
 # 3. Download raw data from CHI@TACC Swift directly onto the VM
 export OS_APPLICATION_CREDENTIAL_ID=your_id
@@ -1188,28 +1165,12 @@ for f in ["RAW_recipes.csv", "RAW_interactions.csv"]:
 conn.close()
 EOF
 
-# 4. ML system — build, run data pipeline, train, serve
+# 4. Unified system — build, data pipeline, train, serve, app, monitor
 cd ~/sparky-ml
-make build
-make run-infra
-make data          # feature engineering + Soda quality checks on the downloaded CSVs
-make train-direct  # trains + fairness gate + explainability + quality gates + registers
-# Promote via MLflow REST API (retrain-api not running yet at this point)
-curl -s -X POST http://localhost:5000/api/2.0/mlflow/model-versions/transition-stage \
-  -H "Content-Type: application/json" \
-  -d '{"name": "sparky-ranker", "version": "1", "stage": "Production", "archive_existing_versions": false}' \
-  | python3 -m json.tool
-make run-serving
-make run-monitoring
+docker compose --profile pipeline up -d --build
+docker compose --profile pipeline ps
 
-# 5. SparkyFitness
-cd ~/SparkyFitness/docker
-docker compose -f docker-compose.prod.yml -f docker-compose.sparky-build.yml --env-file .env up -d --build
-
-# 6. Connect networks
-docker network connect sparky-ml_sparky-net sparkyfitness-server
-
-# 7. Open browser at http://NEW_IP:3004
+# 5. Open browser at http://NEW_IP:3004
 ```
 
 ---

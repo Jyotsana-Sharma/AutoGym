@@ -1,5 +1,6 @@
 import { log } from '../config/logging.js';
 import recommendationRepository, { MealCandidate, UserGoals } from '../models/recommendationRepository.js';
+import { createHash, randomUUID } from 'crypto';
 
 const ML_URL = process.env.ML_RECOMMENDATION_URL ?? 'http://localhost:8000';
 const ML_MODEL_NAME = process.env.ML_MODEL_NAME ?? 'sparky-ranker';
@@ -85,13 +86,19 @@ function reasonForRecommendation(meal: MealCandidate, goals: UserGoals): string 
 // ML API client
 // ---------------------------------------------------------------------------
 interface MLInstance extends Record<string, number | string> {
-  user_id: string;
-  recipe_id: string;
+  user_id: number;
+  recipe_id: number;
 }
 
 interface MLResponse {
-  predictions: Array<{ recipe_id: string; score: number }>;
+  predictions: Array<{ recipe_id: number | string; score: number }>;
   model_version?: string;
+}
+
+function stablePositiveInt(value: unknown): number {
+  const digest = createHash('sha256').update(String(value)).digest();
+  // Keep the value inside signed 31-bit integer range for the Python serving API.
+  return digest.readUInt32BE(0) & 0x7fffffff;
 }
 
 async function callMLPredict(requestId: string, instances: MLInstance[]): Promise<MLResponse> {
@@ -123,11 +130,17 @@ async function getRecommendations(userId: any, limit: number, excludeRecentDays:
     return { recommendations: [], modelVersion: 'none' };
   }
 
-  const instances: MLInstance[] = candidates.map(meal => ({
-    user_id: String(userId),
-    recipe_id: meal.meal_id,
-    ...buildFeatureVector(meal, goals),
-  }));
+  const mlUserId = stablePositiveInt(userId);
+  const mealByMlId = new Map<number, MealCandidate>();
+  const instances: MLInstance[] = candidates.map(meal => {
+    const mlRecipeId = stablePositiveInt(meal.meal_id);
+    mealByMlId.set(mlRecipeId, meal);
+    return {
+      user_id: mlUserId,
+      recipe_id: mlRecipeId,
+      ...buildFeatureVector(meal, goals),
+    };
+  });
 
   let mlResponse: MLResponse;
   try {
@@ -139,15 +152,15 @@ async function getRecommendations(userId: any, limit: number, excludeRecentDays:
       .slice(0, limit);
     return {
       recommendations: fallback.map(m => ({
-        recommendation_id: crypto.randomUUID(),
+        recommendation_id: randomUUID(),
         meal_id: m.meal_id,
         meal_name: m.meal_name,
         description: m.description,
         score: 0,
         calories: m.calories,
-        protein: m.protein,
-        carbs: m.carbs,
-        fat: m.fat,
+        protein_g: m.protein,
+        carbs_g: m.carbs,
+        fat_g: m.fat,
         serving_size: m.serving_size,
         serving_unit: m.serving_unit,
         reason: reasonForRecommendation(m, goals),
@@ -156,33 +169,32 @@ async function getRecommendations(userId: any, limit: number, excludeRecentDays:
     };
   }
 
-  const mealById = new Map(candidates.map(m => [m.meal_id, m]));
   const ranked = mlResponse.predictions
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
-    .map(p => ({ ...p, meal: mealById.get(p.recipe_id) }))
+    .map(p => ({ ...p, meal: mealByMlId.get(Number(p.recipe_id)) }))
     .filter((p): p is typeof p & { meal: MealCandidate } => p.meal != null);
 
   const saved = await recommendationRepository.saveRecommendations(
     userId,
-    ranked.map(r => ({ meal_id: r.recipe_id, score: r.score, model_version: mlResponse.model_version ?? 'unknown' }))
+    ranked.map(r => ({ meal_id: r.meal.meal_id, score: r.score, model_version: mlResponse.model_version ?? 'unknown' }))
   );
 
   const savedById = new Map(saved.map(s => [s.meal_id, s]));
   const modelVersion = mlResponse.model_version ?? 'unknown';
 
   const recommendations = ranked.map(r => {
-    const savedRec = savedById.get(r.recipe_id);
+    const savedRec = savedById.get(r.meal.meal_id);
     return {
-      recommendation_id: savedRec?.id ?? crypto.randomUUID(),
-      meal_id: r.recipe_id,
+      recommendation_id: savedRec?.id ?? randomUUID(),
+      meal_id: r.meal.meal_id,
       meal_name: r.meal.meal_name,
       description: r.meal.description,
       score: r.score,
       calories: r.meal.calories,
-      protein: r.meal.protein,
-      carbs: r.meal.carbs,
-      fat: r.meal.fat,
+      protein_g: r.meal.protein,
+      carbs_g: r.meal.carbs,
+      fat_g: r.meal.fat,
       serving_size: r.meal.serving_size,
       serving_unit: r.meal.serving_unit,
       reason: reasonForRecommendation(r.meal, goals),

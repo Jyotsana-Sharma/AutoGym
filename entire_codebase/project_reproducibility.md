@@ -205,9 +205,9 @@ git submodule update --init --recursive
 docker compose --profile pipeline up -d
 ```
 
-The `sparkyfitness-setup` container runs automatically first — no manual script needed. It copies all integration patch files into the SparkyFitness source, patches `SparkyFitnessServer.ts` to register the recommendation route, and creates `SparkyFitness/.env`. Only after it exits successfully do `sparkyfitness-server` and `sparkyfitness-frontend` start.
+The `sparkyfitness-setup` container runs automatically first — no manual script needed. It runs `sparkyfitness-integration/apply_integration.py`, copies all integration patch files into the SparkyFitness source, patches `SparkyFitnessServer.ts` to register `/api/recommendations`, patches `Foods.tsx` to render `RecipeRecommendations`, and creates `SparkyFitness/.env`. Only after it exits successfully do `sparkyfitness-server` and `sparkyfitness-frontend` start.
 
-This starts 14 containers in the correct order (batch-pipeline, trainer, and sparkyfitness-setup run once and exit; 12 stay running at steady state):
+This starts 15 services in the correct order (batch-pipeline, trainer, and sparkyfitness-setup run once and exit; the app, serving, retraining, database, and monitoring services stay running at steady state):
 
 ```
 postgres + mlflow
@@ -261,7 +261,7 @@ docker compose --profile retrain run --rm trainer
 This runs the full pipeline:
 1. Loads training data from the shared volume
 2. Trains XGBoost LambdaRank (NDCG@10 objective)
-3. Runs fairness gate (Cohen's d ≤ 0.5 per dietary group)
+3. Runs fairness gate (per-group NDCG@10 must stay within 20% of overall NDCG@10, with allergen safety <1%)
 4. Generates SHAP global feature importance
 5. Registers model to MLflow Registry if all gates pass
 6. Serving API hot-reloads the new model within 60 seconds
@@ -318,6 +318,7 @@ serving starts (loads model, serves /predict /explain)
 retrain-api starts
 drift-monitor starts (checks for feature drift every 5 min)
 prometheus + grafana + alertmanager start
+sparkyfitness-setup applies app integration, then SparkyFitness starts
 ```
 
 If **any step fails** (e.g. fairness gate rejects the model), the chain stops — serving never starts. Fix the issue and re-run the same command.
@@ -425,6 +426,10 @@ docker system prune -a --volumes
 | `sparky-grafana` | 3000 | Dashboards for latency, drift, training history |
 | `sparky-alertmanager` | 9093 | Routes alerts (high error rate, latency, drift) |
 | `sparky-postgres-exporter` | 9187 | Exports PostgreSQL metrics to Prometheus |
+| `sparkyfitness-setup` | — | Applies the recommendation route/UI integration (runs once then exits) |
+| `sparkyfitness-db` | — | SparkyFitness application database |
+| `sparkyfitness-server` | 3010 | SparkyFitness API with recommendation bridge |
+| `sparkyfitness-frontend` | 3004 | SparkyFitness UI with recommendation cards |
 
 ---
 

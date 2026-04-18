@@ -139,6 +139,7 @@ async function saveRecommendations(userId: any, recommendations: Array<{ meal_id
   const client = await getClient(userId);
   try {
     // Ensure table exists
+    await client.query(`CREATE EXTENSION IF NOT EXISTS pgcrypto`);
     await client.query(`
       CREATE TABLE IF NOT EXISTS recommendation_cache (
         id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),

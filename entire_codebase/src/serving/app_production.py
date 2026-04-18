@@ -108,6 +108,14 @@ model_reload_counter = Counter(
     "sparky_model_reloads_total",
     "Number of times the model was reloaded due to a new version",
 )
+model_loaded_timestamp = Gauge(
+    "sparky_model_loaded_timestamp_seconds",
+    "Unix timestamp when the current model was loaded",
+)
+prediction_last_logged_timestamp = Gauge(
+    "sparky_prediction_last_logged_timestamp_seconds",
+    "Unix timestamp when prediction logging last succeeded",
+)
 request_batch_size_hist = Histogram(
     "sparky_request_batch_size",
     "Number of instances per prediction request",
@@ -148,6 +156,7 @@ def _load_model_once():
                 _explainer = None
     try:
         model_version_gauge.set(float(version.lstrip("v")) if version.lstrip("v").isdigit() else 0)
+        model_loaded_timestamp.set(time.time())
     except Exception:
         pass
     logger.info("Model loaded: version=%s source=%s", version, source)
@@ -313,6 +322,7 @@ async def predict(request: PredictRequest):
                 predictions=predictions,
                 timestamp=now,
             )
+            prediction_last_logged_timestamp.set(time.time())
         except Exception as exc:
             logger.warning("Prediction logging failed (non-fatal): %s", exc)
 

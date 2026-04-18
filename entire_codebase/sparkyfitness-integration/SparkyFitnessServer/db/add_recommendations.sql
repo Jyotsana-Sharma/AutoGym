@@ -3,6 +3,8 @@
 -- Apply to SparkyFitness PostgreSQL database.
 -- =============================================================================
 
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 -- ---------------------------------------------------------------------------
 -- recommendation_cache
 -- Stores ML-generated recommendations per user (one batch per request).

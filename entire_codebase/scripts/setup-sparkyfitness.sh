@@ -84,7 +84,7 @@ cp "$INTEGRATION_DIR/SparkyFitnessFrontend/src/pages/Foods/RecipeRecommendations
 echo "      Integration files copied."
 
 # ---------------------------------------------------------------------------
-# Step 4 — Patch SparkyFitnessServer.ts to mount the recommendation route
+# Step 4 — Patch SparkyFitness to mount/render the recommendation feature
 # ---------------------------------------------------------------------------
 echo "[4/5] Patching SparkyFitnessServer.ts to register recommendation route..."
 
@@ -93,36 +93,29 @@ SERVER_FILE="$SPARKY_DIR/SparkyFitnessServer/SparkyFitnessServer.ts"
 if [ ! -f "$SERVER_FILE" ]; then
     echo "      WARNING: $SERVER_FILE not found — skipping auto-patch."
     echo "      Manually add the following to SparkyFitnessServer.ts:"
-    echo "        import { createRecommendationRouter } from './routes/recommendationRoutes';"
-    echo "        app.use('/api', createRecommendationRouter(pool));"
+    echo "        import recommendationRoutes from './routes/recommendationRoutes.js';"
+    echo "        app.use('/api/recommendations', recommendationRoutes);"
 else
-    if grep -q "createRecommendationRouter" "$SERVER_FILE"; then
+    if grep -q "recommendationRoutes" "$SERVER_FILE"; then
         echo "      Route already registered — skipping."
     else
         python3 - "$SERVER_FILE" <<'PYEOF'
-import sys, re
+import sys
 
 path = sys.argv[1]
 with open(path, 'r') as f:
     content = f.read()
 
-# 1. Insert import after the last existing router import line
-import_line = 'import { createRecommendationRouter } from "./routes/recommendationRoutes";'
-# Find the last "import { create...Router }" line and append after it
-content = re.sub(
-    r'(import \{ create\w+Router \} from "\./routes/\w+";\n)(?!import \{ create)',
-    lambda m: m.group(0) + import_line + '\n',
-    content,
-    count=1
-)
+import_line = "import recommendationRoutes from './routes/recommendationRoutes.js';"
+mount_line = "app.use('/api/recommendations', recommendationRoutes);"
 
-# 2. Insert route mount after the last existing app.use("/api", ...Router(...)) line
-mount_line = '  app.use("/api", createRecommendationRouter(pool));'
-content = re.sub(
-    r'(  app\.use\("/api",\s+create\w+Router\([^)]*\)\);)',
-    lambda m: m.group(0) + '\n' + mount_line,
-    content,
-    count=1
+content = content.replace(
+    "import foodRoutes from './routes/foodRoutes.js';",
+    "import foodRoutes from './routes/foodRoutes.js';\n" + import_line,
+)
+content = content.replace(
+    "app.use('/api/foods', foodRoutes);",
+    "app.use('/api/foods', foodRoutes);\n" + mount_line,
 )
 
 with open(path, 'w') as f:
@@ -131,6 +124,39 @@ with open(path, 'w') as f:
 print("      SparkyFitnessServer.ts patched successfully.")
 PYEOF
     fi
+fi
+
+echo "      Patching Foods.tsx to render RecipeRecommendations..."
+FOODS_FILE="$SPARKY_DIR/SparkyFitnessFrontend/src/pages/Foods/Foods.tsx"
+if [ -f "$FOODS_FILE" ] && ! grep -q "RecipeRecommendations" "$FOODS_FILE"; then
+    python3 - "$FOODS_FILE" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+with open(path, "r") as f:
+    content = f.read()
+
+content = content.replace(
+    "import MealManagement from './MealManagement';",
+    "import RecipeRecommendations from './RecipeRecommendations';\nimport MealManagement from './MealManagement';",
+)
+content = content.replace(
+    "      {/* Meal Management Section */}\n",
+    "      {/* ML Recommendations Section */}\n"
+    "      <Card>\n"
+    "        <CardContent className=\"pt-6\">\n"
+    "          <RecipeRecommendations limit={6} />\n"
+    "        </CardContent>\n"
+    "      </Card>\n\n"
+    "      {/* Meal Management Section */}\n",
+)
+
+with open(path, "w") as f:
+    f.write(content)
+print("      Foods.tsx patched successfully.")
+PYEOF
+else
+    echo "      Foods.tsx already patched or missing — skipping."
 fi
 
 # ---------------------------------------------------------------------------

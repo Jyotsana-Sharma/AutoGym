@@ -92,6 +92,14 @@ class PredictionLogger:
                 );
                 CREATE INDEX IF NOT EXISTS idx_inf_features_ts ON inference_features(captured_at);
             """)
+            await conn.execute("""
+                ALTER TABLE user_interactions
+                DROP CONSTRAINT IF EXISTS user_interactions_action_check;
+
+                ALTER TABLE user_interactions
+                ADD CONSTRAINT user_interactions_action_check
+                CHECK (action IN ('view','cook','rate','skip','served','logged','dismissed','saved'));
+            """)
 
     async def log_batch(
         self,
@@ -117,7 +125,7 @@ class PredictionLogger:
                     rows,
                 )
                 # Also write top-ranked prediction as a synthetic user interaction
-                # so the retraining data pipeline can use it
+                # so the retraining data pipeline can use served impressions.
                 top = [p for p in predictions if p.rank == 1]
                 if top:
                     p = top[0]
@@ -154,15 +162,19 @@ class PredictionLogger:
                     float(rating) if rating is not None else None,
                     action,
                 )
-                # Write back to user_interactions for retraining loop
-                if rating is not None:
-                    await conn.execute(
-                        """INSERT INTO user_interactions
-                           (user_id, recipe_id, rating, action, created_at)
-                           VALUES ($1, $2, $3, $4, NOW())
-                           ON CONFLICT DO NOTHING""",
-                        user_id, recipe_id, float(rating), action,
-                    )
+                # Write back to user_interactions for the retraining loop.  Keep
+                # UI actions and simulator actions distinct; init_db.sql accepts
+                # both sets so the insert does not silently disappear.
+                await conn.execute(
+                    """INSERT INTO user_interactions
+                       (user_id, recipe_id, rating, action, created_at)
+                       VALUES ($1, $2, $3, $4, NOW())
+                       ON CONFLICT DO NOTHING""",
+                    user_id,
+                    recipe_id,
+                    float(rating) if rating is not None else None,
+                    action,
+                )
         except Exception as exc:
             logger.warning("Failed to log feedback: %s", exc)
 

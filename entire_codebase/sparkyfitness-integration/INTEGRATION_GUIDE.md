@@ -1,143 +1,132 @@
 # SparkyFitness ML Recommendation Integration Guide
 
-This directory contains all files needed to add the **personalised recipe
-recommendation** feature to the SparkyFitness application.
+This directory contains the patch set that adds the personalized recipe
+recommendation feature to the SparkyFitness application. In the integrated
+AutoGym deployment this patch is applied automatically by the
+`sparkyfitness-setup` container before the SparkyFitness server and frontend
+start.
 
 ---
 
-## Directory map → where each file goes
+## Files
 
 ```
 sparkyfitness-integration/
+├── apply_integration.py
 ├── SparkyFitnessServer/
-│   ├── schemas/recommendationSchemas.ts   → SparkyFitnessServer/schemas/
-│   ├── models/recommendationRepository.ts → SparkyFitnessServer/models/
-│   ├── services/recommendationService.ts  → SparkyFitnessServer/services/
-│   ├── routes/recommendationRoutes.ts     → SparkyFitnessServer/routes/
-│   └── db/add_recommendations.sql         → run once against your PostgreSQL DB
+│   ├── schemas/recommendationSchemas.ts
+│   ├── models/recommendationRepository.ts
+│   ├── services/recommendationService.ts
+│   ├── routes/recommendationRoutes.ts
+│   └── db/add_recommendations.sql
 └── SparkyFitnessFrontend/
     └── src/
-        ├── api/recommendations.ts         → SparkyFitnessFrontend/src/api/
-        └── pages/Foods/
-            └── RecipeRecommendations.tsx  → SparkyFitnessFrontend/src/pages/Foods/
+        ├── api/recommendations.ts
+        ├── hooks/Foods/useRecommendations.ts
+        └── pages/Foods/RecipeRecommendations.tsx
 ```
 
 ---
 
-## Step 1 — Run the database migration
+## Automatic Integration
+
+The preferred path is to let Docker Compose apply the integration:
 
 ```bash
-psql -U sparky -d sparkydb -f SparkyFitnessServer/db/add_recommendations.sql
+cd entire_codebase
+docker compose --profile pipeline up -d
 ```
 
-This creates two tables:
-- `recommendation_cache` — stores ML-generated scores per user
-- `recommendation_interactions` — feedback loop (viewed / logged / dismissed / saved)
-
----
-
-## Step 2 — Copy the new backend files
+The `sparkyfitness-setup` service runs:
 
 ```bash
-cp SparkyFitnessServer/schemas/recommendationSchemas.ts  <repo>/SparkyFitnessServer/schemas/
-cp SparkyFitnessServer/models/recommendationRepository.ts <repo>/SparkyFitnessServer/models/
-cp SparkyFitnessServer/services/recommendationService.ts  <repo>/SparkyFitnessServer/services/
-cp SparkyFitnessServer/routes/recommendationRoutes.ts     <repo>/SparkyFitnessServer/routes/
+python3 /integration/apply_integration.py
+```
+
+It is idempotent and performs four steps:
+
+1. Copies backend route, service, repository, and schema files into `SparkyFitnessServer/`.
+2. Copies frontend API, hook, and `RecipeRecommendations` component into `SparkyFitnessFrontend/`.
+3. Patches `SparkyFitnessServer.ts` with:
+
+```ts
+import recommendationRoutes from './routes/recommendationRoutes.js';
+app.use('/api/recommendations', recommendationRoutes);
+```
+
+4. Patches `Foods.tsx` to render:
+
+```tsx
+<RecipeRecommendations limit={6} />
 ```
 
 ---
 
-## Step 3 — Mount the route in SparkyFitnessServer.ts
+## Manual Integration
 
-Find the section in `SparkyFitnessServer/SparkyFitnessServer.ts` where other
-routers are imported and mounted (e.g. near `mealRoutes`, `foodRoutes`).
-Add the two lines marked with `// ← ADD`:
+Use this path only if you are applying the patch to a separately cloned
+SparkyFitness repository.
 
-```typescript
-// ← ADD: import
-import { createRecommendationRouter } from "./routes/recommendationRoutes";
+```bash
+INTEG=/path/to/AutoGym/entire_codebase/sparkyfitness-integration
+SF=/path/to/SparkyFitness
 
-// ← ADD: mount (pass the same pool/db object used by other routes)
-app.use("/api", createRecommendationRouter(pool));
+APP_DIR=$SF \
+INTEGRATION_DIR=$INTEG \
+ENV_EXAMPLE=/path/to/AutoGym/entire_codebase/.env.sparky.example \
+python3 $INTEG/apply_integration.py
 ```
 
-> **Auth middleware**: The route reads the authenticated user from
-> `req.user?.id`.  SparkyFitness uses better-auth — verify that
-> `req.user.id` is the correct property and adjust the two lines in
-> `recommendationRoutes.ts` if needed.
+Verify:
+
+```bash
+grep -n "recommendationRoutes" \
+  $SF/SparkyFitnessServer/SparkyFitnessServer.ts
+
+grep -n "RecipeRecommendations" \
+  $SF/SparkyFitnessFrontend/src/pages/Foods/Foods.tsx
+```
 
 ---
 
-## Step 4 — Add the environment variable
+## Database Tables
 
-In `.env` (and `.env.example`):
+The application repository creates recommendation tables on demand, and the
+SQL migration is available if you want to apply it explicitly:
 
+```bash
+psql -U sparky -d sparkyfitness_db \
+  -f sparkyfitness-integration/SparkyFitnessServer/db/add_recommendations.sql
 ```
-# ML Recommendation service URL (your SparkyFitness ML Docker service)
-ML_RECOMMENDATION_URL=http://localhost:8000
+
+Tables:
+
+| Table | Purpose |
+|---|---|
+| `recommendation_cache` | Stores the ranked meals returned to a user, with model version and score |
+| `recommendation_interactions` | Stores user actions: `viewed`, `logged`, `dismissed`, `saved` |
+
+The migration enables `pgcrypto` so `gen_random_uuid()` works on a fresh
+PostgreSQL instance.
+
+---
+
+## Environment
+
+The SparkyFitness server needs the ML serving endpoint:
+
+```bash
+ML_RECOMMENDATION_URL=http://sparky-serving:8000
 ML_MODEL_NAME=sparky-ranker
 ```
 
-In `docker-compose.yml` for the `sparkyfitness-server` service add:
-
-```yaml
-environment:
-  ML_RECOMMENDATION_URL: http://sparky-serving:8000
-  ML_MODEL_NAME: sparky-ranker
-```
-
-> `sparky-serving` is the container name defined in the ML system's
-> `docker-compose.yml`.  Both compose files must share a Docker network:
->
-> ```yaml
-> # in the SparkyFitness docker-compose.yml
-> networks:
->   sparky-net:
->     external: true     # declared in the ML docker-compose.yml
-> ```
->
-> Or run both with a single compose using `include:` / `extends:`.
+In the unified Compose deployment, `sparkyfitness-server` is attached to both
+the SparkyFitness network and `sparky-net`, so it can reach the ML service by
+the internal name `http://sparky-serving:8000`.
 
 ---
 
-## Step 5 — Copy the frontend files
-
-```bash
-cp SparkyFitnessFrontend/src/api/recommendations.ts \
-   <repo>/SparkyFitnessFrontend/src/api/
-
-cp SparkyFitnessFrontend/src/pages/Foods/RecipeRecommendations.tsx \
-   <repo>/SparkyFitnessFrontend/src/pages/Foods/
-```
-
----
-
-## Step 6 — Embed the component in the Foods page
-
-Open `SparkyFitnessFrontend/src/pages/Foods/Foods.tsx` (or
-`MealManagement.tsx`) and embed the panel where you want recommendations to
-appear — for example, after the search bar:
-
-```tsx
-// ← ADD import
-import RecipeRecommendations from "./RecipeRecommendations";
-
-// ← ADD inside the JSX, e.g. below the meal search section
-<RecipeRecommendations
-  limit={6}
-  onLogMeal={(mealId) => {
-    // call your existing log-to-diary function here
-    // e.g. handleAddMealToDiary(mealId)
-  }}
-/>
-```
-
-The component is self-contained: it fetches data, renders loading skeletons,
-handles errors with a retry button, and logs user interactions automatically.
-
----
-
-## How the feature works end-to-end
+## End-To-End Flow
 
 ```
 User opens Foods page
@@ -148,39 +137,55 @@ RecipeRecommendations (React)
       │
       ▼
 recommendationRoutes (Express)
-  → RecommendationService
-      ├─ getUserGoals()            ← user_goals table
-      ├─ getRecentlyLoggedMealIds() ← food_entries table
-      └─ getCandidateMeals()       ← meals + meal_foods + food_variants
+  → recommendationService
+      ├─ getUserGoals()
+      ├─ getRecentlyLoggedMealIds()
+      └─ getCandidateMeals()
+      │
+      ▼
+Stable numeric surrogate IDs generated for ML request
       │
       ▼  POST /predict
-  SparkyFitness ML serving API (FastAPI, port 8000)
+SparkyFitness ML serving API (FastAPI, port 8000)
       └─ XGBoost LambdaRank scores each meal
       │
       ▼
-  Top-N ranked meals returned to frontend
+Predicted numeric IDs are mapped back to SparkyFitness meal UUIDs
       │
       ▼
-User clicks "Add to Diary" → feedback logged → recommendation_interactions
+Top-N ranked meals returned to frontend
+      │
+      ▼
+User clicks Add / Save / Dismiss
+      │
+      ▼
+POST /api/recommendations/feedback
+      │
+      ▼
+recommendation_interactions
 ```
 
----
-
-## Graceful degradation
-
-If the ML service is unreachable, `recommendationService.ts` automatically
-falls back to a protein-proximity heuristic (meals closest to 30 % of the
-user's protein target come first).  The frontend is unaffected — it just
-receives a list of meals with `score: 0` and `model_version: "fallback"`.
+The ML serving API also logs prediction outputs and raw feature values to the
+ML PostgreSQL database. Those logs feed drift monitoring and retraining.
+App-side UI feedback is stored in the SparkyFitness database; joining it with
+ML-side logs requires a shared request or recommendation identifier.
 
 ---
 
-## Future improvements
+## Graceful Degradation
+
+If the ML service is unreachable, `recommendationService.ts` falls back to a
+protein-proximity heuristic. The Foods page still renders recommendations, and
+the response reports `model_version: "fallback"`.
+
+---
+
+## Known Extension Points
 
 | Improvement | Where |
 |---|---|
-| Explicit dietary/allergen preferences | Add `user_dietary_preferences` table; wire into `inferDietaryFlags()` |
-| PCA history embeddings | Compute from `food_entries` in `recommendationService.ts`; send to ML API |
-| Allergen detection from ingredients | Parse ingredient names in `buildFeatureVector()` using `ALLERGEN_KEYWORDS` from `build_training_table.py` |
-| Meal-type slot filtering | Pass `meal_type` through to ML API; retrain with meal-type feature |
-| A/B testing | Use `model_version` field; route % of traffic to shadow model |
+| Forward app feedback to ML `/feedback` | `recommendationService.recordFeedback()` |
+| Explicit dietary/allergen preferences | `buildFeatureVector()` and SparkyFitness profile tables |
+| PCA history embeddings from live app data | `recommendationService.ts` before `/predict` |
+| Meal-type slot filtering | Query params + candidate SQL filtering |
+| Per-version app feedback analysis | Add shared request/recommendation identifier to both DBs |

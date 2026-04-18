@@ -59,7 +59,7 @@ groups:
 
       - alert: ModelVersionStale
         expr: >
-          (time() - sparky_model_version * 0) > 86400
+          time() - sparky_model_loaded_timestamp_seconds > 86400
         for: 1h
         labels:
           severity: info
@@ -154,7 +154,7 @@ groups:
     rules:
       - alert: PredictionLoggingLag
         expr: >
-          time() - pg_stat_activity_query_start{query=~".*prediction_log.*"} > 300
+          time() - sparky_prediction_last_logged_timestamp_seconds > 300
         for: 5m
         labels:
           severity: warning

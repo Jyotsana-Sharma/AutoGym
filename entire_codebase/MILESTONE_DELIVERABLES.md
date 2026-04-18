@@ -11,7 +11,7 @@
 
 ### 1. Integrated System Deployed on Chameleon Cloud
 
-The full ML system and SparkyFitness application run as 12 Docker containers on a single Chameleon KVM@TACC VM, orchestrated via a **single multi-stage `Dockerfile`** and `docker-compose.yml`.
+The full ML system and SparkyFitness application run on a single Chameleon KVM@TACC VM, orchestrated via a **single multi-stage `Dockerfile`** and `docker-compose.yml`. The `pipeline` profile starts 15 services: one-shot setup/data/training jobs plus the steady-state app, serving, retraining, database, and monitoring services.
 
 **Single Dockerfile — 4 named stages:**
 
@@ -30,16 +30,21 @@ Each service in `docker-compose.yml` selects its stage via `target: data/trainin
 
 | Container | Stage | Role | Port |
 |-----------|-------|------|------|
-| `sparkyfitness-server` | (SparkyFitness) | Node.js/Express API + recommendation bridge | 3001 |
+| `sparkyfitness-setup` | — | Idempotently applies the ML route/UI patch to SparkyFitness | — |
+| `sparkyfitness-db` | — | SparkyFitness application PostgreSQL | — |
+| `sparkyfitness-server` | (SparkyFitness) | Node.js/Express API + recommendation bridge | 3010 |
 | `sparkyfitness-frontend` | (SparkyFitness) | React/Vite UI with `RecipeRecommendations` panel | 3004 |
 | `sparky-serving` | serving | FastAPI XGBoost ranking API + `/explain` endpoint | 8000 |
-| `sparky-db` | — | PostgreSQL — user data + prediction logs + drift log | 5433 |
+| `sparky-postgres` | — | ML PostgreSQL — user interactions + prediction logs + drift log | 5433 |
 | `mlflow` | mlflow | MLflow 3.1.0 tracking + model registry | 5000 |
 | `sparky-retrain-api` | training | HTTP webhook receiver for retraining pipeline | 8080 |
+| `sparky-batch-pipeline` | data | One-shot training table compiler | — |
+| `sparky-trainer` | training | One-shot XGBoost + fairness + registry pipeline | — |
 | `sparky-drift-monitor` | data | KS-test drift loop + 90-day privacy cleanup | — |
 | `prometheus` | — | Metrics scraping | 9090 |
 | `grafana` | — | Dashboards | 3000 |
-| `alertmanager` | — | Alert routing + rollback webhooks | 9093 |
+| `alertmanager` | — | Alert routing | 9093 |
+| `postgres-exporter` | — | PostgreSQL metrics exporter | 9187 |
 
 **Verified live endpoints on VM:**
 - `http://129.114.26.226:3004` — SparkyFitness UI (recommendations visible)
@@ -100,6 +105,7 @@ A personalized meal recommendation feature was added to `CodeWithCJ/SparkyFitnes
 - `services/recommendationService.ts` — builds 47-feature vector per candidate meal, calls ML `/predict`, falls back to protein-proximity heuristic if ML is unreachable (10-second `AbortSignal.timeout`)
 - `models/recommendationRepository.ts` — user goals, recently-logged meal exclusion, candidate pool, recommendation cache + interaction log tables
 - `schemas/recommendationSchemas.ts` — Zod schemas for all request/response types
+- `apply_integration.py` — idempotent setup script used by the `sparkyfitness-setup` container to copy files and patch `SparkyFitnessServer.ts` / `Foods.tsx`
 
 **Full data flow:**
 ```
@@ -107,14 +113,17 @@ User opens Foods page
 → GET /api/recommendations (Express)
 → recommendationService: fetch user goals + recent meals from DB
 → build 47-feature vectors for candidate meals
+→ convert SparkyFitness UUID/string IDs to stable numeric surrogate IDs for the Python ML API
 → POST http://sparky-serving:8000/predict
 → XGBoost LambdaRank scores + ranks candidates
+→ map predicted numeric IDs back to SparkyFitness meal UUIDs
 → top-N results returned with reason strings + nutrition data
 → RecipeRecommendations renders meal cards
 → User clicks "Add to Diary"
 → POST /api/recommendations/feedback (action: "logged")
 → logInteraction() writes to recommendation_interactions table
-→ feedback loop: data available for next retraining cycle
+→ app-level feedback stored in recommendation_interactions
+→ ML retraining loop currently uses serving `/feedback` plus `user_feedback` / `user_interactions`
 ```
 
 ---
@@ -154,7 +163,7 @@ After every training run, the scored test set is automatically loaded and `run_f
 **File:** `src/data/drift_monitor.py:cleanup_old_inference_features()` called every monitoring cycle
 
 - User history sent to ML API as 6 PCA components — raw recipe IDs never leave SparkyFitness
-- User ID passed as integer only; no PII in serving request or prediction log
+- User and meal IDs passed to the ML API as stable numeric surrogate IDs; no email/name/device data is sent to the ML service
 - **90-day retention enforced:** `cleanup_old_inference_features()` runs every 300 seconds, deletes `inference_features` rows older than 90 days, and logs the count deleted
 - Inference features are now captured on every `/predict` call: `prediction_logger.log_features()` called alongside `log_batch()`, populating the `inference_features` table the drift monitor reads from
 
@@ -167,7 +176,7 @@ After every training run, the scored test set is automatically loaded and `run_f
 
 #### Robustness (wired into serving + alerting)
 
-- 13 Prometheus alert rules: `ServingDown`, `HighPredictionLatency` (P95 > 500ms), `HighErrorRate` (>5%), `LowPredictionScores` (median < 0.2), `ZeroPredictionsServed`, `ModelVersionStale`, `PostgresDown`, `MLflowDown`, `HighMemoryUsage`, `HighDiskUsage`, `RetrainingJobFailed`, `NoRetrainingIn7Days`, `PredictionLoggingLag`
+- 14 Prometheus alert rules are defined for serving, infrastructure, retraining, and data quality monitoring
 - KS-test drift monitor: 19 features, every 300 seconds, >30% drift triggers retraining webhook
 - Model fallback: if MLflow Registry unreachable, serves from local `MODEL_FALLBACK_PATH` file
 - CI Stage 4 auto-rollback if smoke test fails after promotion
@@ -349,7 +358,18 @@ Three quality gates — all must pass for registration:
 | `sparky_predictions_total` | Counter | Total predictions, labeled by `model_version` |
 | `sparky_model_version` | Gauge | Currently loaded model version (numeric) |
 | `sparky_model_reloads_total` | Counter | Number of hot-reloads |
+| `sparky_model_loaded_timestamp_seconds` | Gauge | When the current model was loaded |
+| `sparky_prediction_last_logged_timestamp_seconds` | Gauge | Last successful prediction-log write |
 | `sparky_request_batch_size` | Histogram | Instances per `/predict` call (buckets 1,5,10,20,50,100,200) |
+
+The retrain API also exposes:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `sparky_retrain_jobs_total` | Counter | Retrain jobs by status and reason |
+| `sparky_retrain_failures_total` | Counter | Failed retrain jobs |
+| `sparky_last_retrain_timestamp_seconds` | Gauge | Last successful retraining time |
+| `sparky_retrain_job_running` | Gauge | Whether a retraining job is currently running |
 
 Plus standard FastAPI metrics via `prometheus_fastapi_instrumentator`:
 - `http_request_duration_seconds` (latency histogram by endpoint)
@@ -363,7 +383,7 @@ Plus standard FastAPI metrics via `prometheus_fastapi_instrumentator`:
 
 **Implementation:** `monitoring/alert_rules.yml`, `monitoring/alertmanager.yml`
 
-**13 alert rules:**
+**14 alert rules:**
 
 | Alert | Condition | Severity | For |
 |-------|-----------|----------|-----|
@@ -372,14 +392,15 @@ Plus standard FastAPI metrics via `prometheus_fastapi_instrumentator`:
 | `HighErrorRate` | 5xx > 5% of requests | critical | 5 min |
 | `LowPredictionScores` | Median score < 0.2 | warning | 15 min |
 | `ZeroPredictionsServed` | No predictions in 10 min | warning | 10 min |
-| `ModelVersionStale` | Model unchanged >24h | info | 1 hour |
+| `ModelVersionStale` | Loaded model age >24h | info | 1 hour |
 | `PostgresDown` | DB unreachable | critical | 1 min |
 | `MLflowDown` | MLflow unreachable | warning | 2 min |
 | `HighMemoryUsage` | Container memory >85% | warning | 5 min |
 | `HighDiskUsage` | Disk >85% (artifact store) | warning | 5 min |
+| `PostgresHighConnections` | DB connections >80 | warning | 5 min |
 | `RetrainingJobFailed` | Retrain failure in last hour | warning | immediate |
 | `NoRetrainingIn7Days` | No retrain in 604,800 s | info | 1 hour |
-| `PredictionLoggingLag` | Feedback loop lag >5 min | warning | 5 min |
+| `PredictionLoggingLag` | No successful prediction-log write for >5 min | warning | 5 min |
 
 ---
 
@@ -405,7 +426,7 @@ These reach `POST /api/recommendations/feedback` → `recommendationRepository.l
 `POST /explain` returns top-10 SHAP feature contributions + human-readable reason string. `Explainer` instance built on model load; rebuilt on hot-reload. Graceful fallback to rule-based explanation if SHAP unavailable.
 
 **Model version tracking in every response:**  
-`model_version` + `model_source` in every `/predict` response enables per-version A/B analysis. If a new version causes drop in `logged` rate or spike in `dismissed` rate, detectable by joining `prediction_log` with `recommendation_interactions` on `request_id`.
+`model_version` + `model_source` in every `/predict` response enables per-version analysis on the serving side. App-side feedback is stored separately in `recommendation_interactions`; correlating it directly with `prediction_log` would require an explicit shared identifier to be added.
 
 **Hot-reload without downtime:**  
 `_poll_for_new_model()` background thread polls MLflow Registry every 60 seconds. On new Production version detection, swaps `_model` and `_explainer` globals under `threading.RLock`. In-flight requests complete with old model.
@@ -428,7 +449,7 @@ These reach `POST /api/recommendations/feedback` → `recommendationRepository.l
 | SHAP per-request | `explainability.py` → `app_production.py:/explain` | POST /explain returns feature contributions + text | ✓ Wired |
 | Inference feature capture | `prediction_logger.log_features()` → `app_production.py` | Populates inference_features table for drift monitor | ✓ Wired |
 | Output monitoring | `app_production.py` Prometheus | 5 custom metrics + score distribution alert | ✓ Wired |
-| Operational alerts | `alert_rules.yml` | 13 alert rules critical/warning/info | ✓ Wired |
+| Operational alerts | `alert_rules.yml` | 14 alert rules critical/warning/info | ✓ Wired |
 | Rollback | `model_registry.py:rollback_production` | Previous Production archived, instant restore | ✓ Wired |
 | Safeguarding plan | `safeguarding/SAFEGUARDING_PLAN.md` | Covers all 6 principles with concrete mechanisms | ✓ Done |
 | SparkyFitness integration | `sparkyfitness-integration/` | Full stack: React → Express → FastAPI → XGBoost | ✓ Done |

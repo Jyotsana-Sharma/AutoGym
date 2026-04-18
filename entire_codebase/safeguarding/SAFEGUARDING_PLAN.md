@@ -111,14 +111,16 @@ health-adjacent personal information that must be handled carefully.
 **Pseudonymized user IDs**
 - All pipeline tables use integer `user_id` as the only user identifier
 - No email, name, or device information stored in any ML pipeline table
+- SparkyFitness UUID/string IDs are converted to stable numeric surrogate IDs
+  before requests are sent to the Python ranking service
 
-**Prediction log retention policy** (`prediction_log` table)
-- `inference_features` table auto-deleted after 90 days (implement as a
-  PostgreSQL cron job: `DELETE FROM inference_features WHERE captured_at < NOW() - INTERVAL '90 days'`)
+**Inference feature retention policy** (`inference_features` table)
+- `drift_monitor.py:cleanup_old_inference_features()` runs every monitoring
+  cycle and deletes rows older than 90 days
 - Drift monitoring uses aggregate statistics, not individual row lookups
 
 **Minimal feature collection**
-- Only the 44 features needed for the ranking task are logged at inference
+- Only the ranking features needed for the task are logged at inference
 - No request metadata (IP, user-agent, session) is logged to ML tables
 
 **Schema isolation**
@@ -144,14 +146,17 @@ it must be possible to determine who approved the deployment and trace it back.
 **Retraining log** (`retraining_log` table)
 - Every retraining run records: trigger reason, run_id, model version,
   NDCG@10, registered, promoted, duration, status
+- The retrain API exposes Prometheus metrics for job starts, failures,
+  currently running jobs, and the latest successful retraining timestamp
 
 **Rollback audit trail**
 - `model_registry.py rollback()` logs the replacement in MLflow model description
 - Previous production version archived (not deleted) — always available for comparison
 
 **Alert accountability**
-- `alertmanager.yml` routes alerts to webhook; receiver logs alert to `retraining_log`
-- All automated actions (rollback, retraining) are logged with timestamps
+- `alertmanager.yml` routes operational alerts; CI/CD handles rollback after a
+  failed post-promotion smoke test
+- All promotion and rollback actions are logged in MLflow model version metadata
 
 ---
 
@@ -168,11 +173,15 @@ or adversarial inputs.
 - Drift detected if > 30% of features show statistically significant shift (p < 0.05)
 - Automatic retraining trigger sent to retrain-api on detection
 
-**Automated rollback** (Prometheus alert + serving API)
-- Alert: `LowPredictionScores` fires if median score < 0.2 for 15+ minutes
-- Alert: `HighErrorRate` fires if >5% of requests fail for 5+ minutes
-- On alert: Alertmanager calls `/admin/rollback` via webhook → model rolls back
-  to previous Production version without human intervention
+**Automated rollback** (CI/CD + model registry)
+- CI promotes only registered models that pass the NDCG, production-regression,
+  and fairness gates
+- A post-promotion smoke test runs against the live serving API
+- If the smoke test fails, the rollback stage calls `model_registry.rollback`
+  and hot-reloads serving
+- Prometheus alerts surface `LowPredictionScores`, `HighErrorRate`, stale
+  models, and logging lag; wiring those alerts directly to rollback remains an
+  extension point
 
 **Model fallback**
 - If MLflow Registry is unreachable, serving falls back to a local model file
@@ -203,16 +212,16 @@ or adversarial inputs.
 | Fairness        | Group NDCG@10 gate, allergen safety | `safeguarding/fairness_checker.py` | Yes (post-training) |
 | Explainability  | SHAP per-request + global importance | `safeguarding/explainability.py` | Yes |
 | Transparency    | Model version in response, MLflow lineage | `app_production.py`, MLflow | Yes |
-| Privacy         | Pseudonymized IDs, no PII in models, 90-day retention | DB schema, pipeline design | Partial (retention needs cron) |
-| Accountability  | Retraining log, approval gates, rollback trail | `retraining_log`, GitHub Environments | Yes |
-| Robustness      | Drift monitoring, auto-rollback, fallback model | `drift_monitor.py`, alerts, `model_loader.py` | Yes |
+| Privacy         | Pseudonymized IDs, no PII in models, 90-day retention | `drift_monitor.py`, DB schema, pipeline design | Yes |
+| Accountability  | Retraining metrics/logs, approval gates, rollback trail | `retrain_api.py`, MLflow, GitHub Environments | Yes |
+| Robustness      | Drift monitoring, CI rollback, fallback model | `drift_monitor.py`, alerts, `model_loader.py` | Yes |
 
 ---
 
 ## Known Gaps and Next Steps
 
-1. **Retention cron job**: Implement `DELETE FROM inference_features WHERE captured_at < NOW() - INTERVAL '90 days'` as a PostgreSQL scheduled job or Airflow task.
-2. **Differential privacy**: For larger user bases, consider DP-SGD or RAPPOR for user feature aggregation.
-3. **Counterfactual explanations**: Supplement SHAP with "if you liked more Italian food, these recipes would rank higher" style explanations.
-4. **Adversarial robustness**: Add input perturbation testing to catch unusually large feature values that could manipulate rankings.
-5. **External audit**: Document model card and submit to team lead review before production launch.
+1. **Direct alert rollback**: Add an authenticated Alertmanager webhook receiver that can call rollback for a carefully limited set of critical alerts.
+2. **App-feedback join**: Add a shared request/recommendation identifier so SparkyFitness `recommendation_interactions` can be joined directly to ML `prediction_log`.
+3. **Differential privacy**: For larger user bases, consider DP-SGD or RAPPOR for user feature aggregation.
+4. **Counterfactual explanations**: Supplement SHAP with "if you liked more Italian food, these recipes would rank higher" style explanations.
+5. **Adversarial robustness**: Add input perturbation testing to catch unusually large feature values that could manipulate rankings.
