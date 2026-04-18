@@ -371,9 +371,6 @@ services:
       ML_RECOMMENDATION_URL: http://sparky-serving:8000
       ML_MODEL_NAME: sparky-ranker
     volumes:
-      - ./SparkyFitness/SparkyFitnessServer:/app/SparkyFitnessServer:z
-      - /app/SparkyFitnessServer/node_modules
-      - ./SparkyFitness/node_modules:/app/node_modules:z
       - sparkyfitness-uploads:/app/SparkyFitnessServer/uploads
       - sparkyfitness-backup:/app/SparkyFitnessServer/backup
     ports:
@@ -398,9 +395,6 @@ services:
       SPARKY_FITNESS_SERVER_HOST: sparkyfitness-server
       SPARKY_FITNESS_SERVER_PORT: 3010
       VITE_BACKEND_HOST: sparkyfitness-server
-    volumes:
-      - ./SparkyFitness/SparkyFitnessFrontend:/app/SparkyFitnessFrontend:z
-      - /app/SparkyFitnessFrontend/node_modules
     ports:
       - "3004:8080"
     depends_on:
