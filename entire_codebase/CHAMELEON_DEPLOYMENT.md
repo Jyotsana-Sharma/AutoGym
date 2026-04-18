@@ -1,1372 +1,339 @@
-# Deploying SparkyFitness + ML Recommendation System on Chameleon Cloud
+# Chameleon Deployment: AutoGym / SparkyFitness ML System
 
-## Overview
+This is the reproducible deployment path for the integrated system. The grader
+or operator should not need to replay a long manual setup history. After the VM
+is ready, the system is started from the repository with Docker Compose.
 
-This guide deploys the full system on a **KVM@TACC** virtual machine.
-Your raw training data already lives in **CHI@TACC Swift object storage**
-(`proj04-sparky-raw-data`) and stays there permanently — the KVM instance
-pulls from it automatically during the data pipeline step.
+## What Runs
 
-```
-CHI@TACC (data lives here, never moves)
-  Swift: proj04-sparky-raw-data
-    └── RAW_recipes.csv
-    └── RAW_interactions.csv
-  Swift: proj04-sparky-training-data
-    └── train.csv / val.csv / test.csv
-         │
-         │  pulled over HTTPS using Application Credential
-         ▼
-KVM@TACC Virtual Machine  (everything runs here)
-  ├── ML System  ~/sparky-ml/
-  │   ├── sparky-postgres      :5433   ML training database
-  │   ├── sparky-mlflow        :5000   Model registry + experiment tracking
-  │   ├── sparky-serving       :8000   XGBoost ranking API + /explain endpoint
-  │   ├── sparky-retrain-api   :8080   Retraining webhook
-  │   ├── sparky-drift-monitor         KS-test drift + 90-day privacy cleanup
-  │   ├── sparky-prometheus    :9090   Metrics collection
-  │   └── sparky-grafana       :3000   Monitoring dashboards
-  │
-  └── SparkyFitness  ~/SparkyFitness/
-      ├── sparkyfitness-db             User data database
-      ├── sparkyfitness-server :3010   Node.js API
-      └── sparkyfitness-frontend :3004 React UI  ← open this in browser
-```
+One Compose stack starts the SparkyFitness app, ML serving API, MLflow model
+registry, retraining API, data/retraining jobs, PostgreSQL, Prometheus, Grafana,
+and drift monitoring.
 
-**Estimated time:** 60–75 minutes (mostly Docker builds and model training)
-
----
-
-## Phase 1 — Chameleon Account Setup
-
-### Step 1 — Log in to KVM@TACC
-
-1. Go to **https://kvm.tacc.chameleoncloud.org/project/**
-2. Log in with your Chameleon credentials
-3. Confirm the project selector (top-left) shows **proj04**
-
-> KVM@TACC is used for the VM. Your data remains in CHI@TACC Swift —
-> the two sites share the same project and Application Credential.
-
----
-
-### Step 2 — Confirm your Application Credential exists
-
-Your Application Credential was created on CHI@TACC and works across both sites.
-
-1. Go to **Identity → Application Credentials**
-2. If `sparky-ml` is listed — note the **ID** (you will need it for `.env`)
-3. If it is missing, create a new one:
-   - Name: `sparky-ml`
-   - Expiration: leave blank
-   - Roles: default
-   - **Copy the ID and Secret immediately** — secret is shown only once
-
----
-
-### Step 3 — Confirm your SSH key is uploaded
-
-1. Go to **Identity → Key Pairs**
-2. If your key is listed — you are ready
-3. If missing — click **Import Public Key**, paste your public key:
+From scratch:
 
 ```bash
-# Run on your laptop to get your public key
-cat ~/.ssh/id_rsa.pub
-# or
-cat ~/.ssh/id_ed25519.pub
+docker compose --profile pipeline up -d --build
 ```
 
----
+Normal runtime after a model already exists in MLflow:
 
-## Phase 2 — Create a Lease
+```bash
+docker compose --profile runtime up -d
+```
 
-KVM@TACC requires a reservation lease before launching an instance.
+The `pipeline` profile creates Docker volumes automatically, prepares data,
+trains/evaluates/registers the model, and starts the full system. The `runtime`
+profile skips one-shot jobs and loads the current Production model from MLflow
+Model Registry.
 
-### Step 4 — Create a lease
+## Storage
 
-1. Go to **Reservations → Leases → + Create Lease**
-2. Fill in:
+Persistent source data lives in Chameleon Swift:
 
-| Field | Value |
+| Storage | Purpose | Created by |
+|---|---|---|
+| `proj04-sparky-raw-data` | Raw Food.com CSV files | Chameleon Swift |
+| `proj04-sparky-training-data` | Optional compiled train/val/test copies | Chameleon Swift |
+| Docker volumes in `docker-compose.yml` | MLflow registry/artifacts, Postgres data, model cache, Grafana/Prometheus state | Docker Compose |
+
+Docker volumes are declared in [docker-compose.yml](/Users/jyotsanasharma/Desktop/AutoGym/entire_codebase/docker-compose.yml). Do not manually create them for grading or from-scratch reproducibility.
+
+Important:
+
+- If the VM is deleted, local Docker volumes are gone.
+- If only `~/AutoGym` / `~/sparky-ml` directories were removed but Docker volumes remain, the MLflow registry may still contain the Production model.
+- From-scratch reproducibility must not depend on pre-existing Docker volumes.
+
+## 1. Create the Chameleon VM
+
+Use KVM@TACC.
+
+Recommended VM:
+
+| Setting | Value |
 |---|---|
-| Lease Name | `sparky-lease` |
-| Start Date | Now (or 2 minutes from now) |
-| End Date | 7 days from today |
-
-3. Click the **Reservations** tab inside the form → **+ Add Reservation**
-
-| Field | Value |
-|---|---|
-| Reservation Type | Virtual Instance |
-| Amount | 1 |
+| Image | `CC-Ubuntu22.04` |
 | Flavor | `m1.xlarge` |
+| Disk | 60 GB recommended, 30 GB minimum |
+| Network | `sharednet1` |
 
-4. Click **Create Lease**
-5. Wait until the lease status shows **Active** (~1–2 minutes)
+Open these inbound TCP ports in the security group:
 
----
-
-## Phase 3 — Security Group
-
-### Step 5 — Create a security group
-
-On KVM@TACC, Security Groups are under **Network → Security Groups**.
-
-1. Go to **Network → Security Groups → + Create Security Group**
-2. Name: `sparky-ports`, Description: `SparkyFitness ML system`
-3. Click **Create Security Group**
-4. Click **Manage Rules → + Add Rule** for each row below:
-
-| Port | Protocol | Direction | Purpose |
-|---|---|---|---|
-| 22 | TCP | Ingress | SSH |
-| 3004 | TCP | Ingress | SparkyFitness UI |
-| 3010 | TCP | Ingress | SparkyFitness API |
-| 5000 | TCP | Ingress | MLflow UI |
-| 8000 | TCP | Ingress | ML Serving API + /explain |
-| 8080 | TCP | Ingress | Retrain webhook |
-| 3000 | TCP | Ingress | Grafana |
-| 9090 | TCP | Ingress | Prometheus |
-
----
-
-## Phase 4 — Launch the Instance
-
-### Step 6 — Launch a VM
-
-1. Go to **Compute → Instances → Launch Instance**
-2. Fill in each tab of the wizard:
-
-**Details tab**
-
-| Field | Value |
+| Port | Service |
 |---|---|
-| Instance Name | `sparky-ml` |
-| Count | 1 |
+| 22 | SSH |
+| 3004 | SparkyFitness UI |
+| 3010 | SparkyFitness API |
+| 5000 | MLflow |
+| 8000 | ML serving API |
+| 8080 | Retrain API |
+| 3000 | Grafana |
+| 9090 | Prometheus |
 
-**Source tab**
-
-| Field | Value |
-|---|---|
-| Boot Source | Image |
-| Image | `CC-Ubuntu22.04` (search and select) |
-| Volume Size | `30` GB |
-| Delete Volume on Instance Delete | Yes |
-
-**Flavor tab**
-
-Select `m1.xlarge` — 8 vCPU, 16 GB RAM.
-
-**Networks tab**
-
-Select `sharednet1`.
-
-**Security Groups tab**
-
-Select both `default` and `sparky-ports`.
-
-**Key Pair tab**
-
-Select your uploaded key.
-
-3. Click **Launch Instance** — wait until status shows **Active** (~2 minutes)
-
----
-
-### Step 7 — Attach a Floating IP
-
-1. Go to **Compute → Instances**
-2. Find `sparky-ml` → click the **Actions** dropdown → **Associate Floating IP**
-3. If the list is empty click **Allocate IP to Project** first, then associate
-4. **Write down the floating IP** — you will use it everywhere below
-
-Replace `YOUR_IP` with this floating IP for the rest of the guide.
-
----
-
-## Phase 5 — Server Setup
-
-### Step 8 — SSH into the instance
-
-Run this on your **laptop**:
+Attach a floating IP and SSH into the VM:
 
 ```bash
 ssh cc@YOUR_IP
 ```
 
-> The default user on all Chameleon Ubuntu images is `cc`.
-> If the connection times out, wait 2 more minutes — cloud-init is still running.
+## 2. Install Docker
 
----
-
-### Step 9 — Install Docker
-
-Run all of the following on the **Chameleon instance**:
+Run on the VM:
 
 ```bash
-# Update packages first
-sudo apt-get update -y && sudo apt-get upgrade -y
-
-# Install Docker using the official convenience script
-# This handles GPG keys, repository setup, and package install in one step
+sudo apt-get update -y
+sudo apt-get install -y git curl make docker-compose-plugin
 curl -fsSL https://get.docker.com | sudo sh
-
-# Install supporting tools
-sudo apt-get install -y make git curl docker-compose-plugin
-
-# Allow running Docker without sudo
 sudo usermod -aG docker cc
 newgrp docker
 
-# Verify both commands work
 docker --version
 docker compose version
 ```
 
-Expected output:
-```
-Docker version 26.x.x
-Docker Compose version v2.x.x
-```
+If `docker compose version` works, the VM is ready.
 
-> **Note:** `docker-ce`, `docker-ce-cli`, and `containerd.io` are package names
-> installed by the script above — they are NOT commands you run directly.
-> The only command you use is `docker`.
->
-> If `docker compose version` says "command not found":
-> ```bash
-> sudo apt-get install -y docker-compose-plugin
-> ```
+## 3. Clone the Repository
 
----
-
-### Step 10 — Install Node.js 20 and pnpm
-
-SparkyFitness requires Node.js 20 and pnpm.
+Run on the VM:
 
 ```bash
-# Install Node.js 20
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt-get install -y nodejs
-
-# Install pnpm
-sudo npm install -g pnpm
-
-# Verify
-node --version    # must be v20.x.x
-pnpm --version
-```
-
----
-
-## Phase 6 — Get the Code onto the Instance
-
-All commands in this phase run on the **Chameleon instance** (inside your SSH session).
-
-### Step 11 — Clone the ML system from GitHub
-
-The ML system lives at:
-`https://github.com/Jyotsana-Sharma/AutoGym` — branch `clean_branch` — subfolder `entire_codebase/`
-
-```bash
-# Clone the repo
-git clone --branch clean_branch --single-branch \
+git clone --branch clean_branch --single-branch --recurse-submodules \
   https://github.com/Jyotsana-Sharma/AutoGym.git ~/AutoGym
 
-# Remove ~/sparky-ml if it already exists (plain directory or wrong symlink)
-# Safe to run even if it doesn't exist yet
-if [ -L ~/sparky-ml ]; then
-  rm ~/sparky-ml                   # remove wrong symlink
-elif [ -d ~/sparky-ml ]; then
-  # save any .env inside before deleting
-  [ -f ~/sparky-ml/.env ] && cp ~/sparky-ml/.env ~/AutoGym/entire_codebase/.env
-  rm -rf ~/sparky-ml
-fi
-
-# Create the correct symlink
 ln -s ~/AutoGym/entire_codebase ~/sparky-ml
-
-# Verify the symlink (must show arrow → not a plain directory listing)
-ls -la ~ | grep sparky-ml
-# Expected:  lrwxrwxrwx ... sparky-ml -> /home/cc/AutoGym/entire_codebase
-ls ~/sparky-ml
-# Should show: Dockerfile  Makefile  configs  src  requirements  docker-compose.yml ...
-```
-
-> If the repo is private, use a Personal Access Token:
-> ```bash
-> git clone --branch clean_branch --single-branch \
->   https://<your_github_username>:<your_token>@github.com/Jyotsana-Sharma/AutoGym.git ~/AutoGym
-> ```
-
----
-
-### Step 12 — Clone SparkyFitness only if you are using the upstream app repo
-
-The recommendation integration files are **already on the VM** at
-`~/AutoGym/entire_codebase/sparkyfitness-integration/` (cloned in Step 11).
-Use this step only if your deployment still depends on the upstream
-`CodeWithCJ/SparkyFitness` repository.
-
-If you already maintain a fully integrated SparkyFitness application repo,
-skip this step and deploy that app directly instead.
-
-```bash
-# 1. Clone the upstream SparkyFitness app
-git clone https://github.com/CodeWithCJ/SparkyFitness.git ~/SparkyFitness
-
-# 2. Apply the integration patch idempotently
-APP_DIR=~/SparkyFitness \
-INTEGRATION_DIR=~/AutoGym/entire_codebase/sparkyfitness-integration \
-ENV_EXAMPLE=~/AutoGym/entire_codebase/.env.sparky.example \
-python3 ~/AutoGym/entire_codebase/sparkyfitness-integration/apply_integration.py
-
-# 3. Verify the edits landed correctly
-grep -n "recommendationRoutes\|RecipeRecommendations" \
-    ~/SparkyFitness/SparkyFitnessServer/SparkyFitnessServer.ts \
-    ~/SparkyFitness/SparkyFitnessFrontend/src/pages/Foods/Foods.tsx
-```
-
-You should see two matching lines in each file — the import and the usage.
-
-> **Important:** The upstream `CodeWithCJ/SparkyFitness` repository already contains
-> broken stub versions of `recommendationRoutes.ts`, `recommendationService.ts`, and
-> `recommendationRepository.ts` (class-based implementations with no `export default`).
-> The setup script copies the correct integration files over any upstream stubs.
-> If you skip this step or clone SparkyFitness after a repo update that changes these
-> files, the server will crash-loop with:
-> ```
-> SyntaxError: The requested module './routes/recommendationRoutes.js'
->   does not provide an export named 'default'
-> ```
-> Fix: re-run `apply_integration.py`, then rebuild.
-
----
-
-### Step 13 — Download the raw data on the VM
-
-The full data pipeline runs entirely on the Chameleon VM.
-Your raw CSVs are already in **CHI@TACC Swift** (`proj04-sparky-raw-data`).
-Download them directly onto the VM now:
-
-```bash
-# Install pip3 if not already present
-sudo apt install -y python3-pip
-
-# Install swiftclient on the VM
-pip3 install python-swiftclient
-
-# Create the data directory using the explicit path (avoids symlink ordering issues)
-mkdir -p ~/AutoGym/entire_codebase/data
-
-# Download both CSVs from CHI@TACC Swift directly onto the VM
-python3 - <<'EOF'
-import swiftclient, os, pathlib
-
-conn = swiftclient.Connection(
-    authurl="https://chi.tacc.chameleoncloud.org:5000/v3",
-    auth_version="3",
-    os_options={
-        "auth_type": "v3applicationcredential",
-        "application_credential_id": os.environ["OS_APPLICATION_CREDENTIAL_ID"],
-        "application_credential_secret": os.environ["OS_APPLICATION_CREDENTIAL_SECRET"],
-        "region_name": "CHI@TACC",
-    }
-)
-
-data_dir = pathlib.Path.home() / "AutoGym" / "entire_codebase" / "data"
-data_dir.mkdir(parents=True, exist_ok=True)
-
-for filename in ["RAW_recipes.csv", "RAW_interactions.csv"]:
-    print(f"Downloading {filename} ...")
-    _, content = conn.get_object("proj04-sparky-raw-data", filename)
-    (data_dir / filename).write_bytes(content)
-    size_mb = len(content) / 1e6
-    print(f"  Saved {filename} ({size_mb:.1f} MB)")
-
-conn.close()
-print("Done.")
-EOF
-```
-
-> Get your credentials from **CHI@TACC → Identity → Application Credentials**.
-> Export them before running the script:
->
-> ```bash
-> export OS_APPLICATION_CREDENTIAL_ID=your_id_here
-> export OS_APPLICATION_CREDENTIAL_SECRET=your_secret_here
-> ```
-
-Verify the files downloaded correctly:
-
-```bash
-ls -lh ~/AutoGym/entire_codebase/data/
-# Expected:
-# RAW_recipes.csv       ~50 MB
-# RAW_interactions.csv  ~200 MB
-```
-
-**If Swift is unreachable — download from Kaggle directly on the VM:**
-
-```bash
-# Install Kaggle CLI
-pip3 install kaggle
-
-# Set up Kaggle credentials
-mkdir -p ~/.kaggle
-cat > ~/.kaggle/kaggle.json <<EOF
-{"username":"YOUR_KAGGLE_USERNAME","key":"YOUR_KAGGLE_API_KEY"}
-EOF
-chmod 600 ~/.kaggle/kaggle.json
-
-# Download Food.com dataset directly onto the VM
-cd ~/AutoGym/entire_codebase/data
-kaggle datasets download -d shuyangli94/food-com-recipes-and-user-interactions
-unzip food-com-recipes-and-user-interactions.zip
-mv recipes.csv RAW_recipes.csv 2>/dev/null || true
-mv interactions.csv RAW_interactions.csv 2>/dev/null || true
-
-ls -lh ~/AutoGym/entire_codebase/data/
-```
-
----
-
-## Phase 7 — Configure Environment Variables
-
-### Step 14 — Configure the ML system `.env`
-
-Back on the **Chameleon instance**:
-
-```bash
 cd ~/sparky-ml
+```
+
+If the submodule did not populate:
+
+```bash
+cd ~/AutoGym
+git submodule update --init --recursive
+cd ~/sparky-ml
+```
+
+## 4. Configure `.env`
+
+```bash
 cp .env.example .env
 nano .env
 ```
 
-Update these values — leave everything else as the default:
+Set these values:
 
 ```bash
-# ── CHI@TACC Swift credentials (data lives here) ──────────────────────────
-# These point to CHI@TACC even though your VM is on KVM@TACC — this is correct.
+# Chameleon Swift credentials
 OS_AUTH_URL=https://chi.tacc.chameleoncloud.org:5000/v3
-OS_APPLICATION_CREDENTIAL_ID=your_credential_id_here
-OS_APPLICATION_CREDENTIAL_SECRET=your_credential_secret_here
+OS_APPLICATION_CREDENTIAL_ID=your_credential_id
+OS_APPLICATION_CREDENTIAL_SECRET=your_credential_secret
 OS_REGION_NAME=CHI@TACC
 
-# ── PostgreSQL ─────────────────────────────────────────────────────────────
-POSTGRES_PASSWORD=choose_a_strong_password
-
-# ── MLflow — use YOUR KVM floating IP ─────────────────────────────────────
+# Public URLs / secrets
 MLFLOW_TRACKING_URI=http://YOUR_IP:5000
+SPARKY_FITNESS_FRONTEND_URL=http://YOUR_IP:3004
+POSTGRES_PASSWORD=choose_a_strong_password
+GRAFANA_PASSWORD=choose_a_strong_password
+ROLLBACK_WEBHOOK_TOKEN=choose_a_random_token
 
-# ── Serving ───────────────────────────────────────────────────────────────
-LOG_PREDICTIONS=true
-MODEL_POLL_INTERVAL_SEC=60
-
-# ── Safeguarding — quality gate thresholds ────────────────────────────────
-NDCG_THRESHOLD=0.55          # minimum NDCG@10 for model registration
-IMPROVEMENT_THRESHOLD=0.01   # new model must not regress > 1% vs. production
-DRIFT_THRESHOLD=0.05         # KS-test p-value below which drift is detected
-CHECK_INTERVAL_SECONDS=300   # drift monitor polling interval (seconds)
-
-# ── Monitoring / rollback ─────────────────────────────────────────────────
-GRAFANA_PASSWORD=choose_a_strong_grafana_password
-ROLLBACK_WEBHOOK_TOKEN=paste_random_token_here
-ROLLBACK_ALERT_NAMES=HighErrorRate
-```
-
-Save with `Ctrl+O`, exit with `Ctrl+X`.
-
----
-
-### Step 15 — Configure SparkyFitness `.env`
-
-For the current integrated deliverable, SparkyFitness is started from the same
-`~/sparky-ml/docker-compose.yml` file as the ML system. Add the SparkyFitness
-values to `~/sparky-ml/.env`; you do not need a separate
-SparkyFitness Compose environment file.
-
-```bash
-cd ~/sparky-ml
-nano .env
-```
-
-Fill in the **required** values below. Everything else can be left blank.
-
-```bash
-# ── Database — values you invent (used to create the DB on first boot) ──────
+# SparkyFitness database and auth secrets
 SPARKY_FITNESS_DB_NAME=sparkyfitness_db
 SPARKY_FITNESS_DB_USER=sparky
 SPARKY_FITNESS_DB_PASSWORD=choose_a_strong_password
 SPARKY_FITNESS_APP_DB_USER=sparky_app
 SPARKY_FITNESS_APP_DB_PASSWORD=choose_another_strong_password
-SPARKY_FITNESS_DB_HOST=sparkyfitness-db
-
-# ── Server — keep as shown ───────────────────────────────────────────────────
-SPARKY_FITNESS_SERVER_HOST=sparkyfitness-server
-SPARKY_FITNESS_SERVER_PORT=3010
-
-# ── Frontend URL — use YOUR KVM floating IP ──────────────────────────────────
-# CRITICAL: This must match the IP you use in your browser exactly.
-# A typo here causes login to silently fail ("almost there" screen, no session).
-# After saving, verify with: grep FRONTEND_URL .env
-SPARKY_FITNESS_FRONTEND_URL=http://YOUR_IP:3004
-
-# ── Secret keys — generate with openssl (see below) ─────────────────────────
 SPARKY_FITNESS_API_ENCRYPTION_KEY=paste_32_char_random_string_here
 BETTER_AUTH_SECRET=paste_another_32_char_random_string_here
 
-# ── ML Recommendation feature ────────────────────────────────────────────────
-# Inside Docker Compose, the app reaches ML serving by service name.
+# Internal service URLs
 ML_RECOMMENDATION_URL=http://sparky-serving:8000
 ML_MODEL_NAME=sparky-ranker
-
-# ── Optional — leave blank to disable these features ────────────────────────
-# SPARKY_FITNESS_EMAIL_HOST=        # SMTP server (for password reset emails)
-# SPARKY_FITNESS_EMAIL_PORT=        # SMTP port
-# SPARKY_FITNESS_EMAIL_USER=        # SMTP username
-# SPARKY_FITNESS_EMAIL_PASS=        # SMTP password
-# SPARKY_FITNESS_EMAIL_FROM=        # From address for emails
-# SPARKY_FITNESS_EMAIL_SECURE=      # true/false for TLS
-# SPARKY_FITNESS_ADMIN_EMAIL=       # Email that gets admin panel access
-# SPARKY_FITNESS_DISABLE_SIGNUP=    # Set to true to block new registrations
-# SPARKY_FITNESS_LOG_LEVEL=         # Defaults to info
 ```
 
-> The `WARN: variable is not set` messages for the optional fields are harmless —
-> they just mean those features (email, admin panel) are disabled, which is fine.
-
-**Generate the two secret keys** — run this twice and use each output:
+Generate secret values with:
 
 ```bash
 openssl rand -hex 32
 ```
 
-Save with `Ctrl+O`, exit with `Ctrl+X`.
+## 5. Start the Full System From Scratch
 
-> The `sparkyfitness-setup` service also creates `SparkyFitness/.env` from
-> `.env.sparky.example` if that file is missing, so the application source tree
-> has a local env file for development.
-
----
-
-## Phase 8 — Start the Unified ML + SparkyFitness System
-
-### Step 16 — Start the complete integrated stack
-
-This is the preferred path for the milestone submission. It builds the ML
-images, applies the SparkyFitness recommendation integration, compiles data,
-trains/registers a model, starts serving, and starts monitoring.
+This is the main reproducibility command:
 
 ```bash
 cd ~/sparky-ml
 docker compose --profile pipeline up -d --build
+```
+
+This command:
+
+1. Builds all images from the single multi-stage Dockerfile.
+2. Creates required Docker volumes automatically.
+3. Applies the SparkyFitness ML integration.
+4. Runs data compilation.
+5. Trains, evaluates, and registers a model in MLflow.
+6. Starts serving, app, retraining API, monitoring, and drift monitor.
+
+Check status:
+
+```bash
 docker compose --profile pipeline ps
 ```
 
-The `sparkyfitness-setup` container runs `apply_integration.py` automatically,
-then exits successfully. The server and frontend start only after that patch
-step completes.
+Expected steady-state services include:
 
-Verify:
+```text
+sparky-postgres
+sparky-mlflow
+sparky-serving
+sparky-retrain-api
+sparky-drift-monitor
+sparky-prometheus
+sparky-grafana
+sparky-postgres-exporter
+sparkyfitness-db
+sparkyfitness-server
+sparkyfitness-frontend
+```
+
+The one-shot containers `sparkyfitness-setup`, `sparky-batch-pipeline`, and
+`sparky-trainer` may show as exited after they complete successfully.
+
+## 6. Verify
 
 ```bash
 curl http://localhost:8000/health
 curl http://localhost:8080/health
-docker compose --profile pipeline ps
+curl -sf http://localhost:8080/model/production | python3 -m json.tool
 ```
 
-After this first bootstrap succeeds, use the smaller steady-state runtime
-profile for normal restarts:
-
-```bash
-docker compose --profile runtime up -d
-docker compose --profile runtime ps
-```
-
-The `pipeline` profile defines 14 services because it includes three one-shot
-jobs: `sparkyfitness-setup`, `batch-pipeline`, and `trainer`. The `runtime`
-profile skips those and starts 11 steady-state services. Normal runtime startup
-does not retrain; `sparky-serving` loads the current Production model from the
-MLflow Model Registry and polls the registry for newer Production versions.
-
-Open:
+Open in a browser:
 
 | Service | URL |
 |---|---|
 | SparkyFitness UI | `http://YOUR_IP:3004` |
-| ML serving health/docs | `http://YOUR_IP:8000/health`, `http://YOUR_IP:8000/docs` |
+| ML serving docs | `http://YOUR_IP:8000/docs` |
 | MLflow | `http://YOUR_IP:5000` |
-| Prometheus | `http://YOUR_IP:9090` |
 | Grafana | `http://YOUR_IP:3000` |
+| Prometheus | `http://YOUR_IP:9090` |
 
-The detailed step-by-step commands below remain useful for debugging individual
-parts of the system, but the integrated deployment should use the single
-Compose profile above.
+## 7. Normal Restart
 
----
-
-## Phase 8B — Debugging the ML System Separately
-
-### Step 16B — Build all Docker images
-
-The ML system uses a **single multi-stage `Dockerfile`** (in the repo root).
-One file, four named stages — `data`, `training`, `serving`, `mlflow`.
-Docker-compose selects the right stage per service via `target:`.
-Each stage gets only its own dependencies, so image sizes stay small.
-The `safeguarding/` module (fairness checker + explainability) is in the shared
-base stage and is automatically available to both training and serving images.
-
-```bash
-cd ~/sparky-ml
-
-# Builds all four stage images — takes 5–10 minutes on first run
-make build
-```
-
-Wait until the build completes before moving on.
-
-To build a single stage manually (e.g. if only serving changed):
-```bash
-docker build --target serving -t sparky-serving:local .
-```
-
----
-
-### Step 17 — Start infrastructure (PostgreSQL + MLflow)
-
-```bash
-make run-infra
-
-# This command waits until both services pass health checks before returning.
-# Verify MLflow is up:
-curl http://localhost:5000/health
-# Expected response: {"status": "ok"}
-```
-
----
-
-### Step 18 — Verify Swift connectivity (optional but recommended)
-
-```bash
-# Quick check that your KVM instance can reach CHI@TACC Swift
-python3 - <<'EOF'
-import os, swiftclient
-try:
-    conn = swiftclient.Connection(
-        authurl=os.environ.get("OS_AUTH_URL", "https://chi.tacc.chameleoncloud.org:5000/v3"),
-        auth_version="3",
-        os_options={
-            "auth_type": "v3applicationcredential",
-            "application_credential_id": open(os.path.expanduser("~/sparky-ml/.env")).read().split("OS_APPLICATION_CREDENTIAL_ID=")[1].split()[0],
-            "application_credential_secret": open(os.path.expanduser("~/sparky-ml/.env")).read().split("OS_APPLICATION_CREDENTIAL_SECRET=")[1].split()[0],
-        }
-    )
-    containers = [c['name'] for c in conn.get_account()[1]]
-    print("Swift reachable. Containers:", containers)
-except Exception as e:
-    print("Swift check failed:", e)
-EOF
-```
-
-Expected output:
-```
-Swift reachable. Containers: ['proj04-sparky-raw-data', 'proj04-sparky-training-data']
-```
-
-If this fails, check your `OS_APPLICATION_CREDENTIAL_ID` and `OS_APPLICATION_CREDENTIAL_SECRET` in `.env`.
-
----
-
-### Step 19 — Run the data pipeline
-
-```bash
-make data
-
-# The pipeline:
-#   1. Downloads RAW_recipes.csv + RAW_interactions.csv from CHI@TACC Swift
-#   2. Runs feature engineering (build_training_table.py)
-#   3. Runs Soda data quality checks (11 checks on enriched_recipes,
-#      4 checks on each of train/val/test) — pipeline aborts if any fail
-#   4. Writes train/val/test splits to the Docker training-data volume
-#   5. Uploads versioned splits back to proj04-sparky-training-data in Swift
-#
-# Takes 3–8 minutes. Completed output looks like:
-# SODA QUALITY REPORT
-#   Total checks:  23
-#   Passed:        23
-#   Failed:        0
-#   Result: PASS ✓
-# DONE: Batch Pipeline Complete
-# Train: ~80,000 rows  Val: ~10,000 rows  Test: ~10,000 rows
-```
-
----
-
-### Step 20 — Train the model
-
-```bash
-make train-direct
-```
-
-> Note: `make train-direct` uses `--rm` so the trainer container is automatically
-> deleted after it finishes. Do not run `docker logs -f sparky-trainer` — the
-> output prints directly to your terminal. Training takes 5–15 minutes.
-
-The training pipeline runs **five sequential steps** including the safeguarding
-fairness gate. Completed output looks like:
-
-```
-Step 1/5: Running data quality checks...
-  Soda data quality checks PASSED
-
-Step 2/5: Preparing training config...
-
-Step 3/5: Running training...
-  ndcg_at_10=0.8148  wall_time_seconds=42.3
-
-Step 3.5/5: Running fairness check and explainability...
-  Fairness gate PASSED: PASSED — all groups within acceptable range
-  Global explainability logged (20 features)
-  Artifacts logged to MLflow: fairness_results.json,
-    explainability/global_feature_importance.json, explainability/shap_summary.png
-
-Step 4/5: Evaluating quality gates and registering model...
-  Gate ndcg_threshold:       PASSED  (0.8148 >= 0.55)
-  Gate improvement_over_prod: PASSED  (no existing production model)
-  Gate fairness:             PASSED
-  Registered as version 1 in Staging. NDCG@10=0.8148
-
-Step 5/5: Skipping auto-promotion (manual approval required)
-```
-
-**If the fairness gate fails**, training will print:
-```
-Fairness gate FAILED: FAILED — 2 group violations + allergen_fail=False
-  Groups that failed:
-    user_vegan=1: ndcg=0.41 (min acceptable=0.65)
-    user_gluten_free=1: ndcg=0.38 (min acceptable=0.65)
-Registration result: Quality gates FAILED: ['fairness']. NDCG=0.8148
-```
-See the Troubleshooting section for how to handle this.
-
----
-
-### Step 21 — Promote model to Production
-
-`make promote` requires the retrain-api container to be running, which is not
-started yet at this point. Promote directly via the MLflow REST API instead:
-
-```bash
-curl -s -X POST http://localhost:5000/api/2.0/mlflow/model-versions/transition-stage \
-  -H "Content-Type: application/json" \
-  -d '{"name": "sparky-ranker", "version": "1", "stage": "Production", "archive_existing_versions": false}' \
-  | python3 -m json.tool
-```
-
-Expected response contains `"current_stage": "Production"`.
-
----
-
-### Step 22 — Start steady-state runtime
-
-```bash
-# Start the 11 long-running services without rerunning one-shot training jobs
-docker compose --profile runtime up -d
-
-# Confirm all containers are running
-docker compose --profile runtime ps
-```
-
-Expected output:
-```
-sparky-postgres        Up    0.0.0.0:5433->5432/tcp
-sparky-mlflow          Up    0.0.0.0:5000->5000/tcp
-sparky-serving         Up    0.0.0.0:8000->8000/tcp
-sparky-retrain-api     Up    0.0.0.0:8080->8080/tcp
-sparky-drift-monitor   Up
-sparky-prometheus      Up    0.0.0.0:9090->9090/tcp
-sparky-grafana         Up    0.0.0.0:3000->3000/tcp
-sparkyfitness-db       Up
-sparkyfitness-server   Up    0.0.0.0:3010->3010/tcp
-sparkyfitness-frontend Up    0.0.0.0:3004->8080/tcp
-```
-
----
-
-### Step 23 — Test the ML serving API
-
-```bash
-curl -s -X POST http://localhost:8000/predict \
-  -H "Content-Type: application/json" \
-  -d '{
-    "request_id": "test-1",
-    "model_name": "sparky-ranker",
-    "instances": [{
-      "user_id": "1", "recipe_id": "100",
-      "rating": 4.2,
-      "minutes": 30, "n_ingredients": 8, "n_steps": 5,
-      "avg_rating": 4.2, "n_reviews": 150, "cuisine": "italian",
-      "calories": 45.0, "total_fat": 10.0, "sugar": 5.0,
-      "sodium": 8.0, "protein": 20.0, "saturated_fat": 4.0, "carbohydrate": 15.0,
-      "total_fat_g": 7.8, "sugar_g": 2.5, "sodium_g": 0.18,
-      "protein_g": 10.0, "saturated_fat_g": 3.1, "carbohydrate_g": 41.25,
-      "has_egg": 0, "has_fish": 0, "has_milk": 1, "has_nuts": 0,
-      "has_peanut": 0, "has_sesame": 0, "has_shellfish": 0, "has_soy": 0, "has_wheat": 1,
-      "daily_calorie_target": 2000, "protein_target_g": 150,
-      "carbs_target_g": 200, "fat_target_g": 65,
-      "user_vegetarian": 0, "user_vegan": 0, "user_gluten_free": 0,
-      "user_dairy_free": 0, "user_low_sodium": 0, "user_low_fat": 0,
-      "history_pc1": 0.1, "history_pc2": -0.3, "history_pc3": 0.5,
-      "history_pc4": 0.0, "history_pc5": 0.2, "history_pc6": -0.1
-    }]
-  }' | python3 -m json.tool
-```
-
-You should get a JSON response with a `predictions` array containing a numeric score.
-
----
-
-### Step 24 — Test the Explainability endpoint (Safeguarding)
-
-The `/explain` endpoint implements the **explainability** pillar of the
-safeguarding plan — it answers "why was this recipe recommended?"
-using SHAP TreeExplainer values.
-
-```bash
-curl -s -X POST http://localhost:8000/explain \
-  -H "Content-Type: application/json" \
-  -d '{
-    "instance": {
-      "user_id": "1", "recipe_id": "100",
-      "rating": 4.2,
-      "minutes": 30, "n_ingredients": 8, "n_steps": 5,
-      "avg_rating": 4.2, "n_reviews": 150, "cuisine": "italian",
-      "calories": 45.0, "total_fat": 10.0, "sugar": 5.0,
-      "sodium": 8.0, "protein": 20.0, "saturated_fat": 4.0, "carbohydrate": 15.0,
-      "total_fat_g": 7.8, "sugar_g": 2.5, "sodium_g": 0.18,
-      "protein_g": 10.0, "saturated_fat_g": 3.1, "carbohydrate_g": 41.25,
-      "has_egg": 0, "has_fish": 0, "has_milk": 1, "has_nuts": 0,
-      "has_peanut": 0, "has_sesame": 0, "has_shellfish": 0, "has_soy": 0, "has_wheat": 1,
-      "daily_calorie_target": 2000, "protein_target_g": 150,
-      "carbs_target_g": 200, "fat_target_g": 65,
-      "user_vegetarian": 0, "user_vegan": 0, "user_gluten_free": 0,
-      "user_dairy_free": 0, "user_low_sodium": 0, "user_low_fat": 0,
-      "history_pc1": 0.1, "history_pc2": -0.3, "history_pc3": 0.5,
-      "history_pc4": 0.0, "history_pc5": 0.2, "history_pc6": -0.1
-    },
-    "top_k": 5
-  }' | python3 -m json.tool
-```
-
-Expected response:
-```json
-{
-  "explanation": "This recipe was recommended because: your protein target, Average community rating, Cooking time (min) match your preferences.",
-  "top_contributing_features": [
-    {"feature": "protein_target_g", "display_name": "Your protein target",
-     "value": 150.0, "shap_contribution": 0.1823, "direction": "positive"},
-    {"feature": "avg_rating", "display_name": "Average community rating",
-     "value": 4.2, "shap_contribution": 0.1204, "direction": "positive"},
-    ...
-  ],
-  "method": "SHAP TreeExplainer"
-}
-```
-
----
-
-### Step 25 — Verify safeguarding artifacts in MLflow
-
-Open the MLflow UI: `http://YOUR_IP:5000`
-
-1. Click the experiment → click the training run
-2. Under **Artifacts**, you should see:
-   - `fairness_results.json` — per-group NDCG + allergen safety results
-   - `explainability/global_feature_importance.json` — SHAP mean |SHAP| per feature
-   - `explainability/shap_summary.png` — feature importance bar chart
-   - `quality_gate_results.json` — all three gate pass/fail with values
-3. Under **Tags**, you should see:
-   - `fairness_passed = True`
-   - `quality_gate_status = PASSED`
-
----
-
-### Step 26 — Verify drift monitoring and privacy retention
-
-The drift monitor runs continuously and also enforces the 90-day privacy
-retention policy on stored inference features.
-
-```bash
-# Run a one-off drift check to confirm it's working
-docker exec sparky-drift-monitor \
-  python src/data/drift_monitor.py --once 2>/dev/null | python3 -m json.tool
-
-# Check the monitor loop is running
-docker logs sparky-drift-monitor --tail 20
-```
-
-Expected output from `--once`:
-```json
-{
-  "run_at": "2026-04-16T...",
-  "checks": {
-    "ingestion_quality": {"passed": true},
-    "training_set_quality": {"passed": true},
-    "inference_drift": {
-      "skipped": true,
-      "reason": "insufficient live samples: 0 < 100"
-    }
-  },
-  "actions_taken": []
-}
-```
-
-> Drift monitoring requires ≥100 live inference feature rows in the database
-> before it runs the KS-test. These accumulate automatically as users receive
-> recommendations. After the app has served ~100 requests, re-run `--once`
-> and you will see per-feature KS statistics.
-
-The privacy retention log line appears when there are rows to clean up:
-```
-Privacy retention: deleted 0 inference_features rows older than 90 days
-```
-
----
-
-## Phase 9 — Legacy Separate SparkyFitness Startup Removed
-
-Earlier drafts of this guide deployed SparkyFitness from a separate upstream
-Compose project and then manually connected networks. That path is no longer
-used for the milestone because it duplicates infrastructure and is easier to
-misconfigure.
-
-Use only the unified deployment from `~/sparky-ml`:
-
-```bash
-docker compose --profile pipeline up -d --build   # first bootstrap
-docker compose --profile runtime up -d            # normal restarts
-```
-
-The unified Compose file builds SparkyFitness locally, applies the ML
-integration with `sparkyfitness-setup`, and connects the app to the ML serving
-container automatically.
-
----
-
-## Phase 10 — Open the App and See the Feature
-
-### Step 30 — Open SparkyFitness in your browser
-
-On your laptop:
-
-```
-http://YOUR_IP:3004
-```
-
----
-
-### Step 31 — Set up your account and goals
-
-1. Click **Sign Up** and create an account
-2. Complete onboarding — set your **daily nutrition goals** (Calories, Protein, Carbs, Fat targets)
-   - These are what the ML model uses to rank meals for you personally
-3. Go to **Settings → Nutrients** to confirm goals are saved
-
----
-
-### Step 32 — Add meal templates
-
-The recommendation system ranks meals that exist in SparkyFitness's meal library.
-
-1. Go to **Foods** in the left sidebar
-2. Scroll down to **Meal Management → + Create Meal**
-3. Add a few meals with foods and nutritional data
-4. Mark at least some as **Public** so they appear in the candidate pool
-
----
-
-### Step 33 — See the recommendations
-
-1. Go to **Foods** in the left sidebar
-2. The **"Recommended for You"** panel appears at the top of the page
-3. Each card shows:
-   - Meal name and description
-   - Nutrition badges (kcal, P, C, F)
-   - Personalised reason: e.g. *"High protein — fits your 150 g target"*
-   - **Add to Diary**, **★ Save**, **✕ Dismiss** buttons
-4. Clicking **Add to Diary** logs the meal and sends feedback to the ML retraining loop
-
----
-
-### Step 34 — Confirm ML is being called
-
-```bash
-# Watch the serving logs while loading the Foods page
-docker logs -f sparky-serving
-```
-
-When you open the Foods page you should see:
-```
-POST /predict  200 OK  batch_size=12  latency=45ms  model_version=1
-```
-
-Every `/predict` call also writes raw feature values to the `inference_features`
-PostgreSQL table, which the drift monitor reads to detect distribution shift.
-
----
-
-## All URLs After Deployment
-
-Replace `YOUR_IP` with your KVM floating IP.
-
-| Service | URL | Credentials |
-|---|---|---|
-| **SparkyFitness UI** — recommendation feature here | `http://YOUR_IP:3004` | your account |
-| SparkyFitness API | `http://YOUR_IP:3010` | — |
-| ML Serving API health | `http://YOUR_IP:8000/health` | — |
-| ML Serving API docs (interactive) | `http://YOUR_IP:8000/docs` | — |
-| **Explainability endpoint** | `http://YOUR_IP:8000/explain` | POST, see Step 24 |
-| MLflow model registry + safeguarding artifacts | `http://YOUR_IP:5000` | — |
-| Grafana dashboards | `http://YOUR_IP:3000` | admin / sparky_admin |
-| Prometheus metrics | `http://YOUR_IP:9090` | — |
-| Retrain webhook status | `http://YOUR_IP:8080/status` | — |
-
----
-
-## Restarting After a VM Reboot
-
-If the instance reboots (but is not deleted):
+After the first successful bootstrap, restart only the runtime services:
 
 ```bash
 cd ~/sparky-ml
 docker compose --profile runtime up -d
-docker compose --profile runtime ps
 ```
 
----
+Runtime does not retrain. It loads the current Production model from MLflow
+Model Registry and polls for newer Production versions.
 
-## Resuming After Lease Expiry / Instance Deleted
+## 8. If Directories Were Removed But Docker Volumes Still Exist
 
-When a KVM lease expires the VM is deleted but **CHI@TACC Swift data is never deleted**.
-
-**What persists on CHI@TACC:**
-- `proj04-sparky-raw-data` — raw CSVs
-- `proj04-sparky-training-data` — compiled train/val/test splits
-- Application Credential and SSH key
-
-**What needs to be redone:**
-- New lease (Step 4)
-- New instance (Steps 5–7)
-- Docker + Node install (Steps 8–10)
-- Clone ML code + SparkyFitness + apply integration (Steps 11–12)
-- Both `.env` files with the **new floating IP** (Steps 14–15)
-- Full deployment (Steps 16–34)
+If you deleted `~/AutoGym` or `~/sparky-ml` but did not remove Docker volumes,
+the model registry may still exist. Re-clone the repo and try runtime before
+retraining:
 
 ```bash
-# Quick redeploy after new instance is up
-
-# 1. Clone ML system (already has sparkyfitness-integration/ inside)
-git clone --branch clean_branch --single-branch \
+git clone --branch clean_branch --single-branch --recurse-submodules \
   https://github.com/Jyotsana-Sharma/AutoGym.git ~/AutoGym
+
 ln -s ~/AutoGym/entire_codebase ~/sparky-ml
-
-# Clone upstream SparkyFitness and apply the recommendation feature
-git clone https://github.com/CodeWithCJ/SparkyFitness.git ~/SparkyFitness
-
-APP_DIR=~/SparkyFitness \
-INTEGRATION_DIR=~/AutoGym/entire_codebase/sparkyfitness-integration \
-ENV_EXAMPLE=~/AutoGym/entire_codebase/.env.sparky.example \
-python3 ~/AutoGym/entire_codebase/sparkyfitness-integration/apply_integration.py
-
-# 2. Configure .env with the NEW floating IP
-cp ~/sparky-ml/.env.example ~/sparky-ml/.env
-nano ~/sparky-ml/.env          # update YOUR_IP, Chameleon credentials, and SparkyFitness secrets
-
-# 3. Download raw data from CHI@TACC Swift directly onto the VM
-export OS_APPLICATION_CREDENTIAL_ID=your_id
-export OS_APPLICATION_CREDENTIAL_SECRET=your_secret
-pip3 install python-swiftclient
-mkdir -p ~/AutoGym/entire_codebase/data
-python3 - <<'EOF'
-import swiftclient, os, pathlib
-conn = swiftclient.Connection(
-    authurl="https://chi.tacc.chameleoncloud.org:5000/v3",
-    auth_version="3",
-    os_options={
-        "auth_type": "v3applicationcredential",
-        "application_credential_id": os.environ["OS_APPLICATION_CREDENTIAL_ID"],
-        "application_credential_secret": os.environ["OS_APPLICATION_CREDENTIAL_SECRET"],
-        "region_name": "CHI@TACC",
-    }
-)
-d = pathlib.Path.home() / "AutoGym" / "entire_codebase" / "data"
-for f in ["RAW_recipes.csv", "RAW_interactions.csv"]:
-    _, c = conn.get_object("proj04-sparky-raw-data", f)
-    (d / f).write_bytes(c)
-    print(f"Downloaded {f} ({len(c)/1e6:.1f} MB)")
-conn.close()
-EOF
-
-# 4. Unified system — build, data pipeline, train, serve, app, monitor
 cd ~/sparky-ml
+cp .env.example .env
+nano .env
+
+docker volume ls --format '{{.Name}}' \
+  | grep -E 'mlflow-db|mlflow-artifacts|models-cache|training-data' || true
+
+docker compose --profile runtime up -d --build
+curl -sf http://localhost:8080/model/production | python3 -m json.tool
+```
+
+If the last command returns model metadata, no retraining is needed. If it
+returns 404/no Production model, run:
+
+```bash
 docker compose --profile pipeline up -d --build
-docker compose --profile pipeline ps
-
-# 5. Open browser at http://NEW_IP:3004
 ```
 
----
-
-## Common ML Operations
+## 9. Common Operations
 
 ```bash
-cd ~/sparky-ml
-
-make train            # trigger async retraining via webhook API (runs all 5 steps incl. fairness)
-make retrain-status   # check if a retraining job is running
-make promote          # promote latest Staging model to Production
-make rollback         # roll back to previous Production model
-make logs-serving     # live serving logs
-make smoke-test       # health check + sample /predict call
-make fairness         # run per-group NDCG fairness check manually on current test set
-make drift-check      # run one-off KS drift check (does not trigger retraining)
-make stop             # stop all ML containers
-make clean            # destroy all containers and volumes (destructive)
-```
-
----
-
-## Troubleshooting
-
-### Recommendations panel does not appear in SparkyFitness
-
-```bash
-# 1. Check ML API is running
-curl http://localhost:8000/health
-
-# 2. Confirm the unified runtime containers are up
-cd ~/sparky-ml
+docker compose logs -f serving
+docker compose logs -f trainer
 docker compose --profile runtime ps
 
-# 3. Check SparkyFitness server logs for ML call errors
-docker logs sparkyfitness-server --tail 50 | grep -i recommend
-
-# 4. Confirm the app sees the ML service name inside Compose
-docker exec sparkyfitness-server sh -lc 'echo $ML_RECOMMENDATION_URL'
+make train          # async retrain via API
+make promote        # promote latest Staging model
+make rollback       # rollback Production model
+make smoke-test     # serving health + sample prediction
 ```
 
-### Fairness gate fails — model not registered
-
-Symptom: `make train-direct` prints `Quality gates FAILED: ['fairness']`
-and the model is not registered to MLflow.
-
-This means one or more dietary groups (e.g. vegan, gluten-free users) have
-NDCG@10 more than 20% below the overall, or allergen violations exceed 1%.
+Stop containers but keep volumes:
 
 ```bash
-# Inspect the full fairness report from the MLflow run
-# First find the run ID from the training output, then:
-curl -s http://localhost:5000/api/2.0/mlflow/artifacts/list \
-  --data-urlencode "run_id=YOUR_RUN_ID" \
-  --data-urlencode "path=fairness_results.json" | python3 -m json.tool
-
-# Or view it directly in the MLflow UI:
-# http://YOUR_IP:5000 → experiment → run → Artifacts → fairness_results.json
+docker compose down
 ```
 
-**Option 1 — Temporarily lower the threshold for testing:**
+Destructive cleanup, including local MLflow registry and databases:
+
 ```bash
-# The fairness check is in safeguarding/fairness_checker.py
-# MAX_DEGRADATION=0.20 means a group can be at most 20% worse than overall
-# Raise this to 0.40 temporarily to see if the model at least trains:
-docker exec sparky-trainer \
-  python -c "
-import os; os.environ['MAX_DEGRADATION']='0.40'
-from safeguarding.fairness_checker import run_fairness_check
-print('Fairness threshold relaxed for debugging')
-"
-# Then retrain:
-make train-direct
+docker compose down -v
 ```
 
-**Option 2 — Check if the group has too few users (<50):**
-Groups with fewer than 50 users are automatically skipped (insufficient
-statistical power). If the failing group is small, it should be skipped.
-Check `n_users` in the fairness report.
+## 10. Notes for Graders
 
-**Option 3 — Check if allergen safety is the failure:**
-```bash
-# In fairness_results.json, look at allergen_safety.violations
-# A violation means dairy-free users are getting milk-containing recipes, etc.
-# This indicates a bug in the feature vector allergen flags.
-grep "allergen_safety" ~/sparky-ml/output/fairness_results.json
-```
-
-### `/explain` endpoint returns 503
+The intended from-scratch reproduction path is:
 
 ```bash
-# Check if SHAP is installed in the serving image
-docker exec sparky-serving pip show shap
-
-# If not installed, add shap to requirements/serving.txt and rebuild:
-echo "shap>=0.45.0" >> ~/sparky-ml/requirements/serving.txt
-docker build --target serving -t sparky-serving-local . -f ~/sparky-ml/Dockerfile
-# Then restart with the new image
-```
-
-### Drift monitor shows "insufficient live samples"
-
-The KS-test requires ≥100 inference feature rows. These are written automatically
-by the serving API on each `/predict` call. If the count is low:
-
-```bash
-# Check how many rows are in the inference_features table
-docker exec sparky-postgres psql -U sparky -d sparky \
-  -c "SELECT COUNT(*), MAX(captured_at) FROM inference_features;"
-
-# If the table is empty, verify log_features is being called:
-docker logs sparky-serving --tail 30 | grep -i "feature logging"
-```
-
-### Swift download fails during `make data`
-
-```bash
-# Check credentials in .env
-grep OS_APPLICATION ~/sparky-ml/.env
-
-# Make sure OS_AUTH_URL points to CHI@TACC, not KVM@TACC
-# It must be: https://chi.tacc.chameleoncloud.org:5000/v3
-
-# Test connectivity manually
-curl -s https://chi.tacc.chameleoncloud.org:5000/v3 | python3 -m json.tool
-```
-
-If Swift is unreachable, download from Kaggle directly on the VM:
-```bash
-pip3 install kaggle
-mkdir -p ~/.kaggle
-echo '{"username":"YOUR_KAGGLE_USERNAME","key":"YOUR_KAGGLE_API_KEY"}' \
-  > ~/.kaggle/kaggle.json
-chmod 600 ~/.kaggle/kaggle.json
-cd ~/AutoGym/entire_codebase/data
-kaggle datasets download -d shuyangli94/food-com-recipes-and-user-interactions
-unzip food-com-recipes-and-user-interactions.zip
-mv recipes.csv RAW_recipes.csv 2>/dev/null || true
-mv interactions.csv RAW_interactions.csv 2>/dev/null || true
-```
-
-### `make train-direct` fails — NDCG below threshold
-
-```bash
-# Lower threshold temporarily for testing
-echo "NDCG_THRESHOLD=0.0" >> ~/sparky-ml/.env
-make train-direct
-# Remove the override once real training succeeds
-```
-
-### MLflow not accessible
-
-```bash
-docker logs sparky-mlflow --tail 20
-# Check if port 5000 is taken
-sudo lsof -i :5000
-```
-
-### Out of disk space
-
-```bash
-docker system df
-docker system prune -f       # remove stopped containers + dangling images
-docker builder prune -f      # remove build cache
-```
-
-### SparkyFitness database not initialising
-
-```bash
-docker logs sparkyfitness-db --tail 30
-# If there are permission errors, reset the volume:
-cd ~/sparky-ml
-docker compose --profile runtime down -v
+git clone --branch clean_branch --single-branch --recurse-submodules \
+  https://github.com/Jyotsana-Sharma/AutoGym.git
+cd AutoGym/entire_codebase
+cp .env.example .env
 docker compose --profile pipeline up -d --build
 ```
 
-### `sparkyfitness-server` crash-loops with SyntaxError on recommendationRoutes
+The `.env` file is only needed for deployment-specific secrets and Chameleon
+Swift credentials. Docker volumes, networks, and service wiring are defined in
+the repository and created by Docker Compose.
 
-Symptom — `docker logs sparkyfitness-server` shows:
+## 11. If Docker Says "No Space Left on Device"
+
+This means the VM root disk is full while Docker is building or extracting image
+layers. It is usually a VM capacity issue, not an application bug.
+
+First inspect disk usage:
+
+```bash
+df -h
+docker system df
+docker volume ls
 ```
-SyntaxError: The requested module './routes/recommendationRoutes.js'
-  does not provide an export named 'default'
+
+Safe cleanup that preserves Docker volumes, including MLflow registry volumes:
+
+```bash
+docker builder prune -af
+docker system prune -af
 ```
 
-Cause: The upstream `CodeWithCJ/SparkyFitness` repo has broken class-based stub
-files for the recommendation feature. The unified deployment uses
-`sparkyfitness-setup` / `apply_integration.py` to overwrite them with the correct
-function-based implementations.
+Do **not** run these unless you intentionally want to delete the local MLflow
+registry, model artifacts, and databases:
 
-Fix:
+```bash
+docker compose down -v
+docker volume prune
+```
+
+Then retry with lower build parallelism to reduce peak temporary disk use:
 
 ```bash
 cd ~/sparky-ml
-
-# Re-apply the integration patch
-docker compose --profile pipeline run --rm sparkyfitness-setup
-
-# Rebuild and restart
-docker compose --profile runtime build --no-cache sparkyfitness-server
-docker compose --profile runtime up -d sparkyfitness-server
-sleep 10 && docker ps | grep sparkyfitness-server
+COMPOSE_PARALLEL_LIMIT=1 docker compose --profile pipeline up -d --build
 ```
 
----
-
-### Login shows "almost there" but never completes
-
-Cause: `SPARKY_FITNESS_FRONTEND_URL` in `.env` does not exactly match the floating
-IP used in the browser. The auth system rejects the cookie/redirect.
-
-Fix:
-
-```bash
-# Check what is currently set
-grep FRONTEND_URL ~/sparky-ml/.env
-
-# Compare with the IP you are actually using in the browser
-# If they differ (e.g., .126 vs .226), fix it:
-sed -i 's/OLD_IP/NEW_IP/g' ~/sparky-ml/.env
-
-# Restart server to pick up the new value
-cd ~/sparky-ml
-docker compose --profile runtime up -d sparkyfitness-server
-
-# Confirm the value the server actually loaded
-docker logs sparkyfitness-server 2>&1 | grep FRONTEND_URL
-```
-
----
-
-## GitHub Actions CI/CD (Optional)
-
-To enable automated weekly retraining, add these secrets in
-**GitHub → repo → Settings → Secrets → Actions → New repository secret**:
-
-| Secret | Value |
-|---|---|
-| `MLFLOW_TRACKING_URI` | `http://YOUR_IP:5000` |
-| `POSTGRES_PASSWORD` | your ML DB password from Step 14 |
-| `SERVING_URL` | `http://YOUR_IP:8000` |
-| `OS_AUTH_URL` | `https://chi.tacc.chameleoncloud.org:5000/v3` |
-| `OS_APPLICATION_CREDENTIAL_ID` | from Step 2 |
-| `OS_APPLICATION_CREDENTIAL_SECRET` | from Step 2 |
-
-The pipeline at `.github/workflows/retrain.yml` runs every Sunday at 2 AM UTC
-and executes 4 stages:
-
-1. **Data quality gate** — Soda checks on train/val/test CSVs + drift report
-2. **Train + fairness gate + explainability + register** — full 5-step pipeline;
-   logs `fairness_results.json` and SHAP artifacts to MLflow; only registers if
-   NDCG ≥ 0.55, no regression vs. production, and fairness passes
-3. **Auto-promote** — promotes Staging → Production + hot-reloads serving
-4. **Auto-rollback** — if smoke test fails after promotion, rolls back to the
-   previous Production version automatically
+If the VM still runs out of space, recreate or resize the VM with a larger root
+disk. Use 60 GB or more for the full pipeline build.

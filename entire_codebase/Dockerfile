@@ -17,6 +17,8 @@ FROM python:3.11-slim AS base
 
 WORKDIR /app
 
+ENV PIP_NO_CACHE_DIR=1
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc libpq-dev curl git \
     && rm -rf /var/lib/apt/lists/*
@@ -24,11 +26,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Safeguarding module needed by training (fairness gate) and serving (/explain)
 COPY safeguarding/ ./safeguarding/
 
-# ── Data stage ────────────────────────────────────────────────────────────────
-FROM base AS data
+# ── Shared Python dependencies ────────────────────────────────────────────────
+# data/training/serving share heavy scientific packages. Installing the union
+# once lets Docker reuse the SciPy/Pandas/XGBoost layers across those images.
+FROM base AS python-deps
 
-COPY requirements/data.txt requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements/data.txt requirements/data.txt
+COPY requirements/training.txt requirements/training.txt
+COPY requirements/serving.txt requirements/serving.txt
+RUN cat requirements/data.txt requirements/training.txt requirements/serving.txt \
+    > /tmp/requirements-all.txt \
+    && pip install -r /tmp/requirements-all.txt \
+    && rm -rf /tmp/requirements-all.txt
+
+# ── Data stage ────────────────────────────────────────────────────────────────
+FROM python-deps AS data
 
 COPY src/data/ ./src/data/
 COPY configs/data/ ./configs/data/
@@ -36,10 +48,7 @@ COPY configs/data/ ./configs/data/
 CMD ["python", "--version"]
 
 # ── Training stage ────────────────────────────────────────────────────────────
-FROM base AS training
-
-COPY requirements/training.txt requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+FROM python-deps AS training
 
 COPY src/training/ ./src/training/
 COPY configs/training/ ./configs/training/
@@ -47,10 +56,7 @@ COPY configs/training/ ./configs/training/
 CMD ["python", "-m", "src.training.retrain_pipeline", "--help"]
 
 # ── Serving stage ─────────────────────────────────────────────────────────────
-FROM base AS serving
-
-COPY requirements/serving.txt requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+FROM python-deps AS serving
 
 COPY src/serving/ ./src/serving/
 
@@ -62,7 +68,9 @@ FROM python:3.11-slim AS mlflow
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir mlflow==3.1.0
+ENV PIP_NO_CACHE_DIR=1
+
+RUN pip install mlflow==3.1.0
 
 RUN mkdir -p /app/local/mlflow /app/local/mlartifacts
 
