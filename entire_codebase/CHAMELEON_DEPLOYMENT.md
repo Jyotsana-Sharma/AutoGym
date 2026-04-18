@@ -27,6 +27,10 @@ trains/evaluates/registers the model, and starts the full system. The `runtime`
 profile skips one-shot jobs and loads the current Production model from MLflow
 Model Registry.
 
+The Compose project is explicitly named `sparky-ml` in `docker-compose.yml`.
+If Docker prints a warning such as `project has been loaded without an explicit
+name from a symlink`, the VM is not using the latest compose file yet.
+
 ## Storage
 
 Persistent source data lives in Chameleon Swift:
@@ -200,13 +204,36 @@ sparkyfitness-frontend
 The one-shot containers `sparkyfitness-setup`, `sparky-batch-pipeline`, and
 `sparky-trainer` may show as exited after they complete successfully.
 
+Expected port mappings include:
+
+```text
+sparky-serving            0.0.0.0:8000->8000/tcp
+sparky-retrain-api        0.0.0.0:8080->8080/tcp
+sparkyfitness-server      0.0.0.0:3010->3010/tcp
+sparkyfitness-frontend    0.0.0.0:3004->8080/tcp
+sparky-mlflow             0.0.0.0:5000->5000/tcp
+sparky-grafana            0.0.0.0:3000->3000/tcp
+sparky-prometheus         0.0.0.0:9090->9090/tcp
+```
+
 ## 6. Verify
 
 ```bash
 curl http://localhost:8000/health
 curl http://localhost:8080/health
 curl -sf http://localhost:8080/model/production | python3 -m json.tool
+curl -I http://localhost:3004
 ```
+
+Expected ML serving output:
+
+```json
+{"status":"healthy","model_version":"v1","model_source":"mlflow_registry","model_name":"sparky-ranker"}
+```
+
+The exact model version may change after retraining, but `model_source` should
+be `mlflow_registry` once a Production model exists. This means serving fetched
+the model from MLflow Model Registry rather than retraining on startup.
 
 Open in a browser:
 
@@ -229,6 +256,15 @@ docker compose --profile runtime up -d
 
 Runtime does not retrain. It loads the current Production model from MLflow
 Model Registry and polls for newer Production versions.
+
+If you pulled new Dockerfile or Compose changes, rebuild the runtime app images:
+
+```bash
+cd ~/sparky-ml
+git pull
+git submodule update --init --recursive
+docker compose --profile runtime up -d --build --force-recreate
+```
 
 ## 8. If Directories Were Removed But Docker Volumes Still Exist
 
@@ -259,7 +295,56 @@ returns 404/no Production model, run:
 docker compose --profile pipeline up -d --build
 ```
 
-## 9. Common Operations
+## 9. If The Frontend Port Resets Or The Site Cannot Be Reached
+
+If `docker compose --profile runtime ps` shows:
+
+```text
+sparkyfitness-frontend    0.0.0.0:3004->8080/tcp
+```
+
+but this fails:
+
+```bash
+curl -I http://localhost:3004
+```
+
+inspect the frontend logs:
+
+```bash
+docker logs sparkyfitness-frontend --tail=120
+```
+
+The current image should run Vite on port `8080`. If logs show Vite listening
+on `5173`, or if Docker still prints the symlink project-name warning, pull the
+latest code and rebuild the app images:
+
+```bash
+cd ~/sparky-ml
+git pull
+git submodule update --init --recursive
+head -12 docker-compose.yml
+
+docker compose --profile runtime build --no-cache \
+  sparkyfitness-frontend sparkyfitness-server
+docker compose --profile runtime up -d --force-recreate \
+  sparkyfitness-frontend sparkyfitness-server
+
+docker logs sparkyfitness-frontend --tail=80
+curl -I http://localhost:3004
+```
+
+The top of `docker-compose.yml` should include:
+
+```yaml
+name: sparky-ml
+```
+
+If `curl -I http://localhost:3004` works on the VM but
+`http://YOUR_IP:3004` is not reachable from your laptop, check the Chameleon
+security group and confirm inbound TCP port `3004` is open.
+
+## 10. Common Operations
 
 ```bash
 docker compose logs -f serving
@@ -284,7 +369,7 @@ Destructive cleanup, including local MLflow registry and databases:
 docker compose down -v
 ```
 
-## 10. Notes for Graders
+## 11. Notes for Graders
 
 The intended from-scratch reproduction path is:
 
@@ -300,7 +385,7 @@ The `.env` file is only needed for deployment-specific secrets and Chameleon
 Swift credentials. Docker volumes, networks, and service wiring are defined in
 the repository and created by Docker Compose.
 
-## 11. If Docker Says "No Space Left on Device"
+## 12. If Docker Says "No Space Left on Device"
 
 This means the VM root disk is full while Docker is building or extracting image
 layers. It is usually a VM capacity issue, not an application bug.
