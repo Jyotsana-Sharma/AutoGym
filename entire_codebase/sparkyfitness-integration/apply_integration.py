@@ -1,8 +1,9 @@
 """Apply the SparkyFitness recommendation integration inside the app tree.
 
-This script is intentionally idempotent.  The docker-compose setup service runs
-it before the frontend/server containers start, and developers can run it
-manually when refreshing the upstream SparkyFitness checkout.
+This script is intentionally idempotent. Docker builds run it inside the image
+so the upstream SparkyFitness checkout can stay clean. Developers can still run
+the manual setup profile when they intentionally want a local host checkout
+patched for debugging.
 """
 
 from __future__ import annotations

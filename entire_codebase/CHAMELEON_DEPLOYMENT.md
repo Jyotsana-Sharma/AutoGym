@@ -27,6 +27,10 @@ trains/evaluates/registers the model, and starts the full system. The `runtime`
 profile skips one-shot jobs and loads the current Production model from MLflow
 Model Registry.
 
+The SparkyFitness ML integration is baked into the Docker images during build.
+The upstream `SparkyFitness` submodule is not modified during normal
+`pipeline` or `runtime` startup.
+
 The Compose project is explicitly named `sparky-ml` in `docker-compose.yml`.
 If Docker prints a warning such as `project has been loaded without an explicit
 name from a symlink`, the VM is not using the latest compose file yet.
@@ -145,7 +149,7 @@ ROLLBACK_WEBHOOK_TOKEN=choose_a_random_token
 SPARKY_FITNESS_DB_NAME=sparkyfitness_db
 SPARKY_FITNESS_DB_USER=sparky
 SPARKY_FITNESS_DB_PASSWORD=choose_a_strong_password
-SPARKY_FITNESS_APP_DB_USER=sparky_app
+SPARKY_FITNESS_APP_DB_USER=sparkyapp
 SPARKY_FITNESS_APP_DB_PASSWORD=choose_another_strong_password
 SPARKY_FITNESS_API_ENCRYPTION_KEY=paste_32_char_random_string_here
 BETTER_AUTH_SECRET=paste_another_32_char_random_string_here
@@ -175,7 +179,9 @@ This command:
 1. Builds all images from the single multi-stage Dockerfile.
 2. Creates required Docker volumes automatically.
 3. Builds the SparkyFitness API/UI images with the ML integration already baked in.
-4. Runs data compilation.
+4. Runs data compilation. If `data/RAW_recipes.csv` or
+   `data/RAW_interactions.csv` are missing, the batch job downloads them from
+   Chameleon Swift using the `OS_*` credentials in `.env`.
 5. Trains, evaluates, and registers a model in MLflow.
 6. Starts serving, app, retraining API, monitoring, and drift monitor.
 
@@ -201,8 +207,9 @@ sparkyfitness-server
 sparkyfitness-frontend
 ```
 
-The one-shot containers `sparkyfitness-setup`, `sparky-batch-pipeline`, and
-`sparky-trainer` may show as exited after they complete successfully.
+The one-shot containers `sparky-batch-pipeline`, `sparky-trainer`, and
+`sparkyfitness-migrate` may show as exited after they complete successfully.
+`sparkyfitness-setup` is manual-only and should not run in normal deployment.
 
 Expected port mappings include:
 
@@ -385,7 +392,32 @@ The `.env` file is only needed for deployment-specific secrets and Chameleon
 Swift credentials. Docker volumes, networks, and service wiring are defined in
 the repository and created by Docker Compose.
 
-## 12. If Docker Says "No Space Left on Device"
+The raw Food.com files do not need to be committed to Git. For a Chameleon
+deployment, keep them in Swift and set the `OS_*` credentials; the batch
+pipeline downloads them automatically when the local `data/` directory is
+empty.
+
+## 12. Recommendation UI Checks
+
+After logging into SparkyFitness, open `Foods`. The page should include a
+`Recommended for You` panel. It first recommends saved SparkyFitness meals; if
+the account has foods but no saved meals yet, it falls back to ranking
+accessible food items so the panel is still usable during a fresh demo.
+
+If the panel is empty:
+
+```bash
+docker logs sparkyfitness-server --tail=120
+docker logs sparky-serving --tail=120
+curl http://localhost:8000/health
+```
+
+Then add or import a few foods in the SparkyFitness UI and refresh the Foods
+page. Recommendation impressions and clicks are written to
+`recommendation_cache` and `recommendation_interactions` in the SparkyFitness
+database, while model feedback is forwarded to the ML serving API.
+
+## 13. If Docker Says "No Space Left on Device"
 
 This means the VM root disk is full while Docker is building or extracting image
 layers. It is usually a VM capacity issue, not an application bug.

@@ -124,8 +124,52 @@ async function getCandidateMeals(userId: any, excludeMealIds: Set<string>, limit
       [userId, ...excluded]
     );
 
+    if (result.rows.length > 0) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return result.rows.map((r: any) => ({
+        meal_id: r.meal_id,
+        meal_name: r.meal_name,
+        description: r.description ?? null,
+        serving_size: r.serving_size ? Number(r.serving_size) : null,
+        serving_unit: r.serving_unit ?? null,
+        n_ingredients: Number(r.n_ingredients),
+        calories: r.calories ? Number(r.calories) : null,
+        protein: r.protein ? Number(r.protein) : null,
+        carbs: r.carbs ? Number(r.carbs) : null,
+        fat: r.fat ? Number(r.fat) : null,
+        saturated_fat: r.saturated_fat ? Number(r.saturated_fat) : null,
+        sugars: r.sugars ? Number(r.sugars) : null,
+        sodium: r.sodium ? Number(r.sodium) : null,
+        dietary_fiber: r.dietary_fiber ? Number(r.dietary_fiber) : null,
+      }));
+    }
+
+    const foodResult = await client.query(
+      `SELECT DISTINCT ON (f.id)
+           f.id             AS meal_id,
+           f.name           AS meal_name,
+           f.brand          AS description,
+           fv.serving_size,
+           fv.serving_unit,
+           1                AS n_ingredients,
+           fv.calories,
+           fv.protein,
+           fv.carbs,
+           fv.fat,
+           fv.saturated_fat,
+           fv.sugars,
+           fv.sodium,
+           fv.dietary_fiber
+         FROM foods f
+         JOIN food_variants fv ON fv.food_id = f.id
+         WHERE f.user_id = $1 OR f.shared_with_public = TRUE
+         ORDER BY f.id, fv.is_default DESC, fv.updated_at DESC
+         LIMIT $2`,
+      [userId, limit]
+    );
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return result.rows.map((r: any) => ({
+    return foodResult.rows.map((r: any) => ({
       meal_id: r.meal_id,
       meal_name: r.meal_name,
       description: r.description ?? null,

@@ -127,7 +127,21 @@ services:
       DATABASE_URL: postgresql://sparky:${POSTGRES_PASSWORD:-sparky_pass}@postgres:5432/sparky
       OUTPUT_PATH: /training-data
     command: >
-      sh -c "python src/data/batch_pipeline.py --raw-dir /data --output-dir /output &&
+      sh -c "set -eu;
+             for f in enriched_recipes.csv training_table.csv train.csv val.csv test.csv manifest.json; do
+               if [ -d /output/$$f ]; then rm -rf /output/$$f; fi;
+             done;
+             DOWNLOAD_FLAG='';
+             if [ ! -f /data/RAW_recipes.csv ] || [ ! -f /data/RAW_interactions.csv ]; then
+               if [ -z "$$OS_APPLICATION_CREDENTIAL_ID" ] || [ -z "$$OS_APPLICATION_CREDENTIAL_SECRET" ]; then
+                 echo 'Raw Food.com files are missing from /data and Chameleon Swift credentials are not set in .env.';
+                 echo 'Set OS_APPLICATION_CREDENTIAL_ID and OS_APPLICATION_CREDENTIAL_SECRET, or place RAW_recipes.csv and RAW_interactions.csv in ./data.';
+                 exit 1;
+               fi;
+               echo 'Raw Food.com files are missing from /data; downloading from Chameleon Swift.';
+               DOWNLOAD_FLAG='--download-raw';
+             fi;
+             python src/data/batch_pipeline.py --raw-dir /data --output-dir /output $$DOWNLOAD_FLAG &&
              cp /output/train.csv /training-data/train.csv &&
              cp /output/val.csv /training-data/val.csv &&
              cp /output/test.csv /training-data/test.csv &&
@@ -315,13 +329,13 @@ services:
   # =========================================================================
   # SPARKYFITNESS APPLICATION
   # The app images bake in the ML integration during build.
-  # sparkyfitness-setup remains as an idempotent helper for local host checkouts.
+  # sparkyfitness-setup is manual-only so the upstream checkout stays clean.
   # =========================================================================
 
   sparkyfitness-setup:
     image: python:3.11-slim
     container_name: sparkyfitness-setup
-    profiles: ["sparkyfitness", "pipeline"]
+    profiles: ["manual-setup"]
     volumes:
       - ./sparkyfitness-integration:/integration:ro
       - ./SparkyFitness:/app:rw
@@ -380,9 +394,6 @@ services:
     ports:
       - "3010:3010"
     depends_on:
-      sparkyfitness-setup:
-        condition: service_completed_successfully
-        required: false
       sparkyfitness-db:
         condition: service_healthy
 
@@ -400,13 +411,14 @@ services:
       PGPASSWORD: ${SPARKY_FITNESS_DB_PASSWORD:-sparky_fit_pass}
     volumes:
       - ./sparkyfitness-integration/SparkyFitnessServer/db/add_recommendations.sql:/migration.sql:ro
+    entrypoint: ["/bin/sh", "-c"]
     command: >
-      sh -c "sleep 10 &&
-             psql -h sparkyfitness-db
-                  -U ${SPARKY_FITNESS_DB_USER:-sparky}
-                  -d ${SPARKY_FITNESS_DB_NAME:-sparkyfitness_db}
-                  -f /migration.sql &&
-             echo 'Recommendation migration applied.'"
+      "sleep 10 &&
+       psql -h sparkyfitness-db
+            -U ${SPARKY_FITNESS_DB_USER:-sparky}
+            -d ${SPARKY_FITNESS_DB_NAME:-sparkyfitness_db}
+            -f /migration.sql &&
+       echo 'Recommendation migration applied.'"
 
   sparkyfitness-frontend:
     build:
@@ -425,8 +437,5 @@ services:
     ports:
       - "3004:8080"
     depends_on:
-      sparkyfitness-setup:
-        condition: service_completed_successfully
-        required: false
       sparkyfitness-server:
         condition: service_started

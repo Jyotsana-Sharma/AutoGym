@@ -48,39 +48,28 @@ CREATE INDEX IF NOT EXISTS idx_rec_interactions_user_id
 ALTER TABLE recommendation_cache        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE recommendation_interactions ENABLE ROW LEVEL SECURITY;
 
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_policies
-        WHERE tablename = 'recommendation_cache'
-          AND policyname = 'user_own_recommendations'
-    ) THEN
-        EXECUTE $pol$
-            CREATE POLICY user_own_recommendations ON recommendation_cache
-                USING (user_id = current_setting('app.current_user_id', true))
-        $pol$;
-    END IF;
+DROP POLICY IF EXISTS user_own_recommendations ON recommendation_cache;
+CREATE POLICY user_own_recommendations ON recommendation_cache
+    USING (user_id = current_setting('app.user_id', true))
+    WITH CHECK (user_id = current_setting('app.user_id', true));
 
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_policies
-        WHERE tablename = 'recommendation_interactions'
-          AND policyname = 'user_own_interactions'
-    ) THEN
-        EXECUTE $pol$
-            CREATE POLICY user_own_interactions ON recommendation_interactions
-                USING (user_id = current_setting('app.current_user_id', true))
-        $pol$;
-    END IF;
-END$$;
+DROP POLICY IF EXISTS user_own_interactions ON recommendation_interactions;
+CREATE POLICY user_own_interactions ON recommendation_interactions
+    USING (user_id = current_setting('app.user_id', true))
+    WITH CHECK (user_id = current_setting('app.user_id', true));
 
 -- ---------------------------------------------------------------------------
 -- Grants for the app user
 -- (sparkyapp is created by SparkyFitness server on first run)
 -- ---------------------------------------------------------------------------
 DO $$
+DECLARE
+    app_role TEXT;
 BEGIN
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sparkyapp') THEN
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON recommendation_cache TO sparkyapp';
-        EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON recommendation_interactions TO sparkyapp';
-    END IF;
+    FOREACH app_role IN ARRAY ARRAY['sparkyapp', 'sparky_app'] LOOP
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = app_role) THEN
+            EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON recommendation_cache TO %I', app_role);
+            EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON recommendation_interactions TO %I', app_role);
+        END IF;
+    END LOOP;
 END$$;
