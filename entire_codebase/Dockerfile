@@ -57,6 +57,8 @@ COPY src/data/run_soda_checks.py ./src/data/run_soda_checks.py
 COPY configs/training/ ./configs/training/
 COPY configs/data/soda_checks.yml ./configs/data/soda_checks.yml
 
+RUN mkdir -p /app/local/ray_results/autogym
+
 CMD ["python", "-m", "src.training.retrain_pipeline", "--help"]
 
 # ── Serving stage ─────────────────────────────────────────────────────────────

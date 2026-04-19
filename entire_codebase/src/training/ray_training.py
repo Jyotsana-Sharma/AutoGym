@@ -113,7 +113,12 @@ def worker_loop(loop_config: dict[str, Any]) -> None:
 
 def run_xgb_ranker_ray(config: dict[str, Any], prepared: PreparedFrames) -> dict[str, float]:
     import ray
-    from ray.air.config import CheckpointConfig, FailureConfig, RunConfig, ScalingConfig
+    try:
+        # Ray 2.7+
+        from ray.train import CheckpointConfig, FailureConfig, RunConfig, ScalingConfig
+    except ImportError:
+        # Ray 2.3–2.6
+        from ray.air.config import CheckpointConfig, FailureConfig, RunConfig, ScalingConfig
     from ray.train.data_parallel_trainer import DataParallelTrainer
     from ray.train.xgboost import RayTrainReportCallback
 
