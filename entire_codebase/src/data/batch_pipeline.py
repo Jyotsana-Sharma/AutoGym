@@ -7,7 +7,7 @@ Runs non-interactively:  docker compose --profile batch run --rm batch-pipeline
 import argparse, hashlib, importlib.util, json, os, shutil, sys, time
 from datetime import datetime
 from pathlib import Path
-import numpy as np, pandas as pd
+import pandas as pd
 
 try:
     import swiftclient
@@ -96,99 +96,6 @@ def validate(train,val,test):
             else: print(f"  WARN: Possible leakage: {dict(bad)}")
     print(f"\n  Checks passed: {ok}"); return True
 
-def _generate_synthetic(out: Path):
-    """Generate minimal synthetic train/val/test CSVs when raw Food.com data is unavailable."""
-    rng = np.random.default_rng(42)
-    n_recipes = 500
-    recipe_ids = np.arange(1, n_recipes + 1)
-    cuisines = ["italian", "american", "mexican", "asian", "mediterranean", "unknown"]
-
-    def make_interactions(n, date_offset_days):
-        from datetime import timedelta
-        base = datetime(2024, 1, 1) + timedelta(days=date_offset_days)
-        user_ids = rng.integers(1, 201, size=n)
-        rec_ids = rng.choice(recipe_ids, size=n)
-        ratings = rng.integers(1, 6, size=n)
-        dates = [
-            (base + pd.Timedelta(days=int(d))).strftime("%Y-%m-%d")
-            for d in rng.integers(0, max(1, 28 - date_offset_days // 30), size=n)
-        ]
-        avg_ratings = rng.uniform(3.0, 5.0, size=n)
-        n_reviews = rng.integers(3, 200, size=n)
-        minutes = rng.integers(5, 121, size=n)
-        n_steps = rng.integers(2, 16, size=n)
-        n_ingredients = rng.integers(2, 21, size=n)
-        cal = rng.uniform(100, 800, size=n)
-        fat = rng.uniform(2, 50, size=n)
-        sugar = rng.uniform(0, 60, size=n)
-        sodium_g = rng.uniform(0.1, 3.0, size=n)
-        protein = rng.uniform(2, 60, size=n)
-        sat_fat = rng.uniform(0, 20, size=n)
-        carb = rng.uniform(5, 120, size=n)
-        return pd.DataFrame({
-            "user_id": user_ids,
-            "recipe_id": rec_ids,
-            "rating": ratings,
-            "date": dates,
-            "label": (ratings >= 4).astype(int),
-            "avg_rating": avg_ratings.round(2),
-            "n_reviews": n_reviews,
-            "minutes": minutes,
-            "n_steps": n_steps,
-            "n_ingredients": n_ingredients,
-            "cuisine": rng.choice(cuisines, size=n),
-            "calories": (cal / 2000 * 100).round(1),
-            "total_fat": (fat / 78 * 100).round(1),
-            "sugar": (sugar / 50 * 100).round(1),
-            "sodium": (sodium_g / 2.3 * 100).round(1),
-            "protein": (protein / 50 * 100).round(1),
-            "saturated_fat": (sat_fat / 20 * 100).round(1),
-            "carbohydrate": (carb / 275 * 100).round(1),
-            "total_fat_g": fat.round(2),
-            "sugar_g": sugar.round(2),
-            "sodium_g": sodium_g.round(4),
-            "protein_g": protein.round(2),
-            "saturated_fat_g": sat_fat.round(2),
-            "carbohydrate_g": carb.round(2),
-            "has_egg": rng.integers(0, 2, size=n),
-            "has_fish": rng.integers(0, 2, size=n),
-            "has_milk": rng.integers(0, 2, size=n),
-            "has_nuts": rng.integers(0, 2, size=n),
-            "has_peanut": rng.integers(0, 2, size=n),
-            "has_sesame": rng.integers(0, 2, size=n),
-            "has_shellfish": rng.integers(0, 2, size=n),
-            "has_soy": rng.integers(0, 2, size=n),
-            "has_wheat": rng.integers(0, 2, size=n),
-            "daily_calorie_target": rng.choice([1800, 2000, 2200, 2500], size=n).astype(float),
-            "protein_target_g": rng.choice([40, 50, 60, 80], size=n).astype(float),
-            "carbs_target_g": rng.choice([200, 250, 300], size=n).astype(float),
-            "fat_target_g": rng.choice([55, 65, 78], size=n).astype(float),
-            "user_vegetarian": rng.integers(0, 2, size=n),
-            "user_vegan": rng.integers(0, 2, size=n),
-            "user_gluten_free": rng.integers(0, 2, size=n),
-            "user_dairy_free": rng.integers(0, 2, size=n),
-            "user_low_sodium": rng.integers(0, 2, size=n),
-            "user_low_fat": rng.integers(0, 2, size=n),
-            "history_pc1": rng.uniform(-2, 2, size=n).round(4),
-            "history_pc2": rng.uniform(-2, 2, size=n).round(4),
-            "history_pc3": rng.uniform(-2, 2, size=n).round(4),
-            "history_pc4": rng.uniform(-2, 2, size=n).round(4),
-            "history_pc5": rng.uniform(-2, 2, size=n).round(4),
-            "history_pc6": rng.uniform(-2, 2, size=n).round(4),
-        })
-
-    train = make_interactions(8000, 0)
-    val   = make_interactions(1000, 365)
-    test  = make_interactions(1000, 380)
-    train.to_csv(out / "train.csv", index=False)
-    val.to_csv(out / "val.csv", index=False)
-    test.to_csv(out / "test.csv", index=False)
-    # minimal enriched_recipes and training_table for downstream steps
-    cols = ["recipe_id", "avg_rating", "n_reviews", "minutes"]
-    train[cols].drop_duplicates("recipe_id").to_csv(out / "enriched_recipes.csv", index=False)
-    train.to_csv(out / "training_table.csv", index=False)
-    print(f"  Synthetic splits: train={len(train)}, val={len(val)}, test={len(test)}")
-
 
 def _write_manifest(out: Path, train_df, val_df, test_df, source: str):
     th = sha256_file(out / "train.csv")
@@ -247,13 +154,10 @@ def main():
     if not ip.exists(): ip=raw/"interactions.csv"
     raw_missing = not rp.exists() or not ip.exists()
     if raw_missing:
-        print("  RAW data files not found — generating synthetic training data for self-contained deployment.")
-        _generate_synthetic(out)
-        print("  Synthetic data ready. Skipping Steps 2–3.")
-        train_df=pd.read_csv(out/"train.csv"); val_df=pd.read_csv(out/"val.csv"); test_df=pd.read_csv(out/"test.csv")
-        validate(train_df,val_df,test_df)
-        _write_manifest(out,train_df,val_df,test_df,"synthetic")
-        return
+        print("  ERROR: RAW_recipes.csv or RAW_interactions.csv not found in", raw)
+        print("  Either place the Food.com raw files in the data/ directory,")
+        print("  or provide Swift credentials to download them automatically.")
+        sys.exit(1)
     df_r=pd.read_csv(rp); df_r.columns=df_r.columns.str.strip().str.lower()
     df_i=pd.read_csv(ip); df_i.columns=df_i.columns.str.strip().str.lower()
     print(f"  Recipes:      {df_r.shape}"); print(f"  Interactions: {df_i.shape}")
@@ -299,10 +203,11 @@ def main():
         enriched=enriched[(enriched["n_reviews"]>=3)&(enriched["minutes"]>0)]
         df_i["label"]=(df_i["rating"]>=4).astype(int)
         training=df_i.merge(enriched[["recipe_id","avg_rating","n_reviews","minutes"]],on="recipe_id",how="inner")
-        training["date"]=pd.to_datetime(training["date"]); latest=training["date"].max()
-        train_df=training[training["date"]<latest-pd.Timedelta(days=14)]
-        val_df=training[(training["date"]>=latest-pd.Timedelta(days=14))&(training["date"]<latest-pd.Timedelta(days=7))]
-        test_df=training[training["date"]>=latest-pd.Timedelta(days=7)]
+        training=training.sort_values("date").reset_index(drop=True)
+        n=len(training); train_end=int(n*0.80); val_end=int(n*0.90)
+        train_df=training.iloc[:train_end]
+        val_df=training.iloc[train_end:val_end]
+        test_df=training.iloc[val_end:]
         enriched.to_csv(out/"enriched_recipes.csv",index=False)
         training.to_csv(out/"training_table.csv",index=False)
         train_df.to_csv(out/"train.csv",index=False)

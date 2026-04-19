@@ -391,25 +391,27 @@ def assemble_training_table(interactions, recipes, user_features):
 # PART 5 — TIME-BASED SPLIT
 # ─────────────────────────────────────────────────────────────
 
-def split_by_time(training):
+def split_by_time(training, train_frac=0.80, val_frac=0.10):
     """
-    Time-stratified split — prevents temporal leakage.
-      Train : interactions older than 14 days from latest date
-      Val   : 8–14 days before latest date
-      Test  : last 7 days  (held-out, never seen during training)
+    Percentage-based temporal split — sorted by date to prevent leakage.
+      Train : first 80% of interactions (chronologically)
+      Val   : next 10%
+      Test  : last 10%  (held-out, never seen during training)
+
+    Using percentages instead of fixed day windows guarantees val and test
+    always have enough rows regardless of the dataset's time range.
     """
     print("\n── STEP 5: Time-based split ───────────────────────────")
-    training["date"] = pd.to_datetime(training["date"])
-    latest = training["date"].max()
+    training = training.sort_values("date").reset_index(drop=True)
+    n = len(training)
+    train_end = int(n * train_frac)
+    val_end   = int(n * (train_frac + val_frac))
 
-    train = training[training["date"] <  latest - pd.Timedelta(days=14)]
-    val   = training[
-        (training["date"] >= latest - pd.Timedelta(days=14)) &
-        (training["date"] <  latest - pd.Timedelta(days=7))
-    ]
-    test  = training[training["date"] >= latest - pd.Timedelta(days=7)]
+    train = training.iloc[:train_end]
+    val   = training.iloc[train_end:val_end]
+    test  = training.iloc[val_end:]
 
-    print(f"  Train : {len(train):,} rows")
+    print(f"  Train : {len(train):,} rows  (dates: {training['date'].iloc[0]} → {training['date'].iloc[train_end-1]})")
     print(f"  Val   : {len(val):,} rows")
     print(f"  Test  : {len(test):,} rows  ← held-out, never seen in training")
     return train, val, test

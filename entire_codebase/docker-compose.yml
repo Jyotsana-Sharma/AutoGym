@@ -138,7 +138,8 @@ services:
                  echo 'Raw Food.com files missing; downloading from Chameleon Swift.';
                  DOWNLOAD_FLAG='--download-raw';
                else
-                 echo 'Raw Food.com files not found and no Swift credentials — will generate synthetic training data.';
+                 echo 'ERROR: RAW_recipes.csv / RAW_interactions.csv not found and no Swift credentials set. Aborting.';
+                 exit 1;
                fi;
              fi;
              python src/data/batch_pipeline.py --raw-dir /data --output-dir /output $$DOWNLOAD_FLAG &&
