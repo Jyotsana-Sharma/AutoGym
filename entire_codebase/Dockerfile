@@ -53,9 +53,9 @@ CMD ["python", "--version"]
 FROM python-deps AS training
 
 COPY src/training/ ./src/training/
-COPY src/data/run_soda_checks.py ./src/data/run_soda_checks.py
+COPY src/data/ ./src/data/
 COPY configs/training/ ./configs/training/
-COPY configs/data/soda_checks.yml ./configs/data/soda_checks.yml
+COPY configs/data/ ./configs/data/
 
 RUN mkdir -p /app/local/ray_results/autogym
 

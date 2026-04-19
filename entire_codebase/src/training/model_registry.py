@@ -26,7 +26,7 @@ from mlflow.tracking import MlflowClient
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = os.environ.get("MLFLOW_MODEL_NAME", "sparky-ranker")
-NDCG_THRESHOLD = float(os.environ.get("NDCG_THRESHOLD", "0.55"))
+NDCG_THRESHOLD = float(os.environ.get("NDCG_THRESHOLD", "0.79"))
 # Minimum improvement over current production model to promote
 IMPROVEMENT_THRESHOLD = float(os.environ.get("IMPROVEMENT_THRESHOLD", "0.01"))
 
