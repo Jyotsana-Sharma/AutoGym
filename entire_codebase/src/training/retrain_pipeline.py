@@ -31,7 +31,7 @@ import mlflow
 import pandas as pd
 import xgboost as xgb
 
-from .model_registry import evaluate_and_register, promote_to_production, export_production_model
+from .model_registry import evaluate_and_register, promote_to_production
 from .train import run_training
 from .mlflow_utils import read_config
 
@@ -64,11 +64,12 @@ def run_soda_checks(train_csv: str, val_csv: str, test_csv: str) -> bool:
         logger.warning("Soda checks script not found at %s — skipping", soda_script)
         return True
 
+    data_dir = str(Path(train_csv).parent)
+    checks_path = Path(__file__).parent.parent.parent / "configs" / "data" / "soda_checks.yml"
     result = subprocess.run(
         [sys.executable, str(soda_script),
-         "--train-csv", train_csv,
-         "--val-csv", val_csv,
-         "--test-csv", test_csv],
+         "--data-dir", data_dir,
+         "--checks", str(checks_path)],
         capture_output=True,
         text=True,
     )

@@ -53,7 +53,9 @@ CMD ["python", "--version"]
 FROM python-deps AS training
 
 COPY src/training/ ./src/training/
+COPY src/data/run_soda_checks.py ./src/data/run_soda_checks.py
 COPY configs/training/ ./configs/training/
+COPY configs/data/soda_checks.yml ./configs/data/soda_checks.yml
 
 CMD ["python", "-m", "src.training.retrain_pipeline", "--help"]
 
