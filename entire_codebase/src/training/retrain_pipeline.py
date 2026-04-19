@@ -199,6 +199,26 @@ def run_retraining(
         result["duration_seconds"] = round(time.perf_counter() - start, 2)
         return result
 
+    # Step 2.5: Baseline comparison — runs popularity model in same experiment for reference
+    logger.info("Step 2.5/6: Running baseline popularity model for comparison...")
+    try:
+        baseline_cfg_path = Path(config_path).parent / "baseline_popularity.yaml"
+        if baseline_cfg_path.exists():
+            patched_baseline_cfg = patch_config_with_data_paths(
+                baseline_cfg_path, train_csv, val_csv, test_csv
+            )
+            baseline_summary = run_training(patched_baseline_cfg)
+            result["baseline_metrics"] = baseline_summary.get("metrics", {})
+            logger.info("Baseline NDCG@10: %.4f", result["baseline_metrics"].get("ndcg_at_10", 0))
+            try:
+                Path(patched_baseline_cfg).unlink(missing_ok=True)
+            except Exception:
+                pass
+        else:
+            logger.info("baseline_popularity.yaml not found — skipping baseline")
+    except Exception as exc:
+        logger.warning("Baseline comparison failed (non-fatal): %s", exc)
+
     # Step 3: Train
     logger.info("Step 3/6: Running training...")
     try:
@@ -207,6 +227,14 @@ def run_retraining(
         metrics = summary.get("metrics", {})
         result["metrics"] = metrics
         logger.info("Training complete. Metrics: %s", metrics)
+        baseline_ndcg = result.get("baseline_metrics", {}).get("ndcg_at_10", None)
+        ray_ndcg = metrics.get("ndcg_at_10", None)
+        if baseline_ndcg is not None and ray_ndcg is not None:
+            improvement = ray_ndcg - baseline_ndcg
+            logger.info(
+                "Model comparison — baseline NDCG@10: %.4f | Ray NDCG@10: %.4f | improvement: %+.4f",
+                baseline_ndcg, ray_ndcg, improvement,
+            )
     except Exception as exc:
         logger.exception("Training failed: %s", exc)
         result["failure_reason"] = str(exc)

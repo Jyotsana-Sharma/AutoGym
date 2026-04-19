@@ -1,6 +1,6 @@
 run_name: baseline_popularity
 candidate_name: baseline_popularity
-experiment_name: autogym-recipe-ranking
+experiment_name: autogym-recipe-ranking-ray
 random_seed: 42
 
 data:
