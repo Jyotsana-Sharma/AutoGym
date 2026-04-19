@@ -142,7 +142,7 @@ services:
                  exit 1;
                fi;
              fi;
-             python src/data/batch_pipeline.py --raw-dir /data --output-dir /output $$DOWNLOAD_FLAG &&
+             python src/data/batch_pipeline.py --raw-dir /data --output-dir /output --db-url "$$DATABASE_URL" $$DOWNLOAD_FLAG &&
              cp /output/train.csv /training-data/train.csv &&
              cp /output/val.csv /training-data/val.csv &&
              cp /output/test.csv /training-data/test.csv &&
@@ -192,6 +192,7 @@ services:
       batch-pipeline:
         condition: service_completed_successfully
     volumes:
+      - ./data:/data
       - training-data:/training-data
       - mlflow-artifacts:/app/local/mlartifacts
       - models-cache:/models
@@ -222,6 +223,7 @@ services:
       postgres:
         condition: service_healthy
     volumes:
+      - ./data:/data
       - training-data:/training-data
       - mlflow-artifacts:/app/local/mlartifacts
       - models-cache:/models

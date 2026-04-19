@@ -149,10 +149,21 @@ def run_retraining(
     output_dir = str(Path(train_csv).parent)
     if db_url:
         logger.info("Step 0/5: Refreshing training data from database...")
+        refresh_cmd = [
+            sys.executable, "-m", "src.data.batch_pipeline",
+            "--output-dir", output_dir,
+            "--raw-dir", "/data",
+            "--db-url", db_url,
+        ]
+        raw_dir = Path("/data")
+        raw_missing = (
+            not (raw_dir / "RAW_recipes.csv").exists()
+            or not (raw_dir / "RAW_interactions.csv").exists()
+        )
+        if raw_missing and os.environ.get("OS_APPLICATION_CREDENTIAL_ID") and os.environ.get("OS_APPLICATION_CREDENTIAL_SECRET"):
+            refresh_cmd.append("--download-raw")
         refresh = subprocess.run(
-            [sys.executable, "-m", "src.data.batch_pipeline",
-             "--output-dir", output_dir,
-             "--raw-dir", "/data"],
+            refresh_cmd,
             capture_output=True,
             text=True,
             env={**os.environ, "DATABASE_URL": db_url},
