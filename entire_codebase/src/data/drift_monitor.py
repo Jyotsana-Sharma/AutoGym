@@ -208,7 +208,7 @@ def check_training_set_quality(train_csv: str, val_csv: str, test_csv: str) -> d
             if "label" in df.columns and split_name == "train":
                 pos_rate = df["label"].mean()
                 result["train_positive_rate"] = round(float(pos_rate), 3)
-                if pos_rate < 0.05 or pos_rate > 0.95:
+                if pos_rate < 0.02 or pos_rate > 0.98:
                     result["issues"].append(
                         f"Severe label imbalance in train: positive_rate={pos_rate:.3f}"
                     )

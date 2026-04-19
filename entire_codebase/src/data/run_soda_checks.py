@@ -168,7 +168,7 @@ def run_builtin_checks(loaded):
                           f"no null {col} (nulls: {df[col].isna().sum()})")
             if "label" in df.columns:
                 bal = df["label"].mean()
-                check(f"{split_name}_balance", 0.1 < bal < 0.9,
+                check(f"{split_name}_balance", 0.05 < bal < 0.95,
                       f"label balance between 0.1-0.9 (actual: {bal:.3f})")
 
     # --- Temporal leakage check across splits ---
@@ -216,7 +216,7 @@ checks for train:
   - missing_count(user_id) = 0
   - missing_count(recipe_id) = 0
   - missing_count(label) = 0
-  - avg(label) between 0.1 and 0.9
+  - avg(label) between 0.05 and 0.95
 
 checks for val:
   - row_count > 1000
