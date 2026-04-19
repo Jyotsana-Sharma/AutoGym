@@ -2,12 +2,11 @@
 **/.git
 **/.DS_Store
 
-.env
 .env.*
 **/.env
 **/.env.*
+!.env
 !.env.example
-!.env.sparky.example
 !**/.env.example
 
 **/node_modules

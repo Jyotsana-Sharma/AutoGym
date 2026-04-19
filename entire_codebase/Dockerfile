@@ -88,7 +88,7 @@ RUN pnpm install
 
 COPY SparkyFitness/ ./
 COPY sparkyfitness-integration/ /integration/
-COPY .env.sparky.example /env.example
+COPY .env /env.example
 RUN APP_DIR=/app INTEGRATION_DIR=/integration ENV_EXAMPLE=/env.example python3 /integration/apply_integration.py
 
 # ── SparkyFitness backend ─────────────────────────────────────────────────────
