@@ -287,11 +287,27 @@ def run_retraining(
     else:
         logger.info("Step 5/5: Skipping auto-promotion (manual approval required)")
 
-    # Export model file for serving fallback
-    if model_export_path and result["registered"]:
+    # Export model file for serving fallback — download directly from run artifacts
+    # (not from Production stage, since model is in Staging at this point)
+    if model_export_path and result.get("registered") and result.get("run_id"):
         try:
-            export_production_model(model_export_path)
-            result["model_exported_to"] = model_export_path
+            import shutil
+            local_dir = mlflow.artifacts.download_artifacts(f"runs:/{result['run_id']}/model")
+            model_file = None
+            for p in Path(local_dir).rglob("*.json"):
+                if p.name in ("model.json",) or "xgboost" in p.name or "model" in p.name:
+                    model_file = p
+                    break
+            if model_file is None:
+                all_files = [f for f in Path(local_dir).rglob("*") if f.is_file()]
+                model_file = all_files[0] if all_files else None
+            if model_file:
+                Path(model_export_path).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(model_file), model_export_path)
+                logger.info("Exported model from run %s to %s", result["run_id"], model_export_path)
+                result["model_exported_to"] = model_export_path
+            else:
+                logger.warning("No model file found in run artifacts at %s", local_dir)
         except Exception as exc:
             logger.warning("Model export failed (non-fatal): %s", exc)
 

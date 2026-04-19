@@ -142,19 +142,31 @@ def _load_model_once():
 
 
 def _poll_for_new_model():
-    """Background thread: poll MLflow Registry every MODEL_POLL_INTERVAL seconds."""
+    """Background thread: poll for model every MODEL_POLL_INTERVAL seconds.
+
+    If no model is loaded yet (startup failed), retries loading on every tick
+    so serving recovers automatically once the model file or MLflow entry appears.
+    """
     while True:
         time.sleep(MODEL_POLL_INTERVAL)
         try:
-            latest_version = loader.get_latest_production_version()
-            if latest_version and latest_version != _model_version:
-                logger.info(
-                    "New Production model detected: %s → %s. Reloading...",
-                    _model_version,
-                    latest_version,
-                )
+            with _model_lock:
+                current_model = _model
+            if current_model is None:
+                logger.info("No model loaded — retrying model load...")
                 _load_model_once()
-                model_reload_counter.inc()
+                if _model is not None:
+                    model_reload_counter.inc()
+            else:
+                latest_version = loader.get_latest_production_version()
+                if latest_version and latest_version != _model_version:
+                    logger.info(
+                        "New Production model detected: %s → %s. Reloading...",
+                        _model_version,
+                        latest_version,
+                    )
+                    _load_model_once()
+                    model_reload_counter.inc()
         except Exception as exc:
             logger.warning("Model poll failed (non-fatal): %s", exc)
 
@@ -164,7 +176,13 @@ def _poll_for_new_model():
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    _load_model_once()
+    try:
+        _load_model_once()
+    except Exception as exc:
+        logger.warning(
+            "Initial model load failed — serving will start without a model "
+            "and retry every %ds: %s", MODEL_POLL_INTERVAL, exc
+        )
     poll_thread = threading.Thread(target=_poll_for_new_model, daemon=True)
     poll_thread.start()
     if prediction_logger:
