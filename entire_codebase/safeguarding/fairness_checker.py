@@ -176,6 +176,13 @@ def run_fairness_check(
     if score_col not in test_df.columns:
         raise ValueError(f"score_col '{score_col}' not found in test_df")
 
+    # Drop string columns that would break numeric groupby operations
+    test_df = test_df.copy()
+    str_cols = [c for c in test_df.columns
+                if test_df[c].dtype == object and c not in (score_col, label_col, group_key)]
+    if str_cols:
+        test_df = test_df.drop(columns=str_cols)
+
     overall = overall_ndcg(test_df, group_key=group_key)
     min_acceptable = overall * (1 - MAX_DEGRADATION)
 
