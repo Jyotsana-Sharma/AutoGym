@@ -48,7 +48,8 @@ DATABASE_URL = os.environ.get(
     "postgresql://sparky:sparky_pass@localhost:5433/sparky",
 )
 RETRAIN_WEBHOOK_URL = os.environ.get("RETRAIN_WEBHOOK_URL", "http://retrain-api:8080/trigger")
-DRIFT_THRESHOLD = float(os.environ.get("DRIFT_THRESHOLD", "0.05"))  # p-value threshold
+DRIFT_THRESHOLD = float(os.environ.get("DRIFT_THRESHOLD", "0.01"))  # p-value threshold
+MIN_KS_STATISTIC = float(os.environ.get("MIN_KS_STATISTIC", "0.1"))  # minimum effect size
 CHECK_INTERVAL_SECONDS = int(os.environ.get("CHECK_INTERVAL_SECONDS", "300"))
 LOOKBACK_HOURS = int(os.environ.get("LOOKBACK_HOURS", "24"))
 MIN_SAMPLES_FOR_DRIFT = int(os.environ.get("MIN_SAMPLES_FOR_DRIFT", "100"))
@@ -120,7 +121,7 @@ def run_ks_test(
         }
 
     ks_stat, p_value = stats.ks_2samp(baseline_clean, live_clean)
-    drift_detected = p_value < DRIFT_THRESHOLD
+    drift_detected = p_value < DRIFT_THRESHOLD and ks_stat >= MIN_KS_STATISTIC
 
     return {
         "feature": feature_name,
@@ -128,6 +129,7 @@ def run_ks_test(
         "p_value": round(float(p_value), 6),
         "drift_detected": drift_detected,
         "threshold": DRIFT_THRESHOLD,
+        "min_ks_statistic": MIN_KS_STATISTIC,
         "baseline_mean": round(float(np.mean(baseline_clean)), 4),
         "live_mean": round(float(np.mean(live_clean)), 4),
         "baseline_std": round(float(np.std(baseline_clean)), 4),

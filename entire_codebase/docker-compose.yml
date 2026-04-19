@@ -165,7 +165,8 @@ services:
       <<: *common-env
       DATABASE_URL: postgresql://sparky:${POSTGRES_PASSWORD:-sparky_pass}@postgres:5432/sparky
       RETRAIN_WEBHOOK_URL: http://retrain-api:8080/trigger
-      DRIFT_THRESHOLD: "0.05"
+      DRIFT_THRESHOLD: "0.01"
+      MIN_KS_STATISTIC: "0.1"
       CHECK_INTERVAL_SECONDS: "300"
       TRAINING_BASELINE_PATH: /training-data/train.csv
     command: python src/data/drift_monitor.py --loop
