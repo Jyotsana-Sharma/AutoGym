@@ -1,5 +1,5 @@
 # Environment / credentials — NEVER commit
-.env
+# .env
 kaggle.json
 .kaggle/
 app-cred-*.sh
