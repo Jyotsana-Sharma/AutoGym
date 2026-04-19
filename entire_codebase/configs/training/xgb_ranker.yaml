@@ -23,7 +23,7 @@ training:
   tree_method: hist
 
 ray:
-  num_workers: 4
+  num_workers: 3
   cpus_per_worker: 2
   storage_path: "/app/local/ray_results/autogym"
   checkpoint_frequency: 25
