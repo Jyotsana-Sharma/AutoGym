@@ -34,6 +34,7 @@ import xgboost as xgb
 from .model_registry import evaluate_and_register, promote_to_production
 from .train import run_training
 from .mlflow_utils import read_config
+from .ranking_data import NON_FEATURE_COLUMNS
 
 # Safeguarding modules — imported with graceful fallback so missing deps
 # don't break the pipeline entirely; but failures are reported in the result.
@@ -247,34 +248,27 @@ def run_retraining(
         except Exception:
             pass
 
-    # Extract run_id from active MLflow run
-    active_run = mlflow.active_run()
-    run_id = active_run.info.run_id if active_run else None
-    if run_id is None:
-        # Try to get the last run from the experiment
-        client = mlflow.tracking.MlflowClient()
-        exp = client.get_experiment_by_name(read_config(cfg_path).get("experiment_name", "sparky"))
-        if exp:
-            runs = client.search_runs(exp.experiment_id, order_by=["start_time DESC"], max_results=1)
-            run_id = runs[0].info.run_id if runs else None
-
+    # Extract run_id — use last_active_run so baseline run in Step 2.5
+    # doesn't shadow the XGBoost run here.
+    last_run = mlflow.last_active_run()
+    run_id = last_run.info.run_id if last_run else None
     result["run_id"] = run_id
 
     # Step 3.5/6: Safeguarding — fairness check + global explainability
     fairness_passed = True
     fairness_summary = "not_run"
     if _SAFEGUARDING_AVAILABLE and run_id:
-        logger.info("Step 3.5/5: Running fairness check and explainability...")
+        logger.info("Step 3.5/6: Running fairness check and explainability...")
         try:
             test_df = pd.read_csv(test_csv)
 
             # Score the test set with the just-trained model from MLflow
             model_uri = f"runs:/{run_id}/model"
             booster = mlflow.xgboost.load_model(model_uri)
-            feature_cols = [
-                c for c in test_df.columns
-                if c not in ("user_id", "recipe_id", "label", "date", "submitted")
-            ]
+            # Use the same exclusion set as ranking_data.py to guarantee
+            # feature names match what the model was trained on
+            _exclude = NON_FEATURE_COLUMNS | {"submitted", "score"}
+            feature_cols = [c for c in test_df.columns if c not in _exclude]
             dmatrix = xgb.DMatrix(test_df[feature_cols].fillna(0).values.astype("float32"),
                                    feature_names=feature_cols)
             test_df["score"] = booster.predict(dmatrix)
