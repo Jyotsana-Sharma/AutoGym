@@ -35,6 +35,8 @@ def make_payload(shift: bool = False) -> dict:
     s = 2.5 if shift else 0.0  # standard deviation shift
 
     return {
+        "request_id": f"load-test-{rng.randint(100000, 999999)}",
+        "model_name": "xgb_ranker",
         "instances": [{
             "user_id": rng.randint(1, 5000),
             "recipe_id": rng.randint(1, 50000),
