@@ -11,7 +11,7 @@ Orchestrates:
 
 Invoked by:
   - retrain_api.py (via HTTP webhook from drift monitor / scheduler)
-  - GitHub Actions CI workflow
+  - Scheduled automatically (weekly + data-influx) via retrain_api.py
   - Manual: python -m src.retrain_pipeline --config configs/train/xgb_ranker.yaml
 """
 
