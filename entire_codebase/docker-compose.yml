@@ -133,13 +133,12 @@ services:
              done;
              DOWNLOAD_FLAG='';
              if [ ! -f /data/RAW_recipes.csv ] || [ ! -f /data/RAW_interactions.csv ]; then
-               if [ -z "$$OS_APPLICATION_CREDENTIAL_ID" ] || [ -z "$$OS_APPLICATION_CREDENTIAL_SECRET" ]; then
-                 echo 'Raw Food.com files are missing from /data and Chameleon Swift credentials are not set in .env.';
-                 echo 'Set OS_APPLICATION_CREDENTIAL_ID and OS_APPLICATION_CREDENTIAL_SECRET, or place RAW_recipes.csv and RAW_interactions.csv in ./data.';
-                 exit 1;
+               if [ -n \"$$OS_APPLICATION_CREDENTIAL_ID\" ] && [ -n \"$$OS_APPLICATION_CREDENTIAL_SECRET\" ]; then
+                 echo 'Raw Food.com files missing; downloading from Chameleon Swift.';
+                 DOWNLOAD_FLAG='--download-raw';
+               else
+                 echo 'Raw Food.com files not found and no Swift credentials — will generate synthetic training data.';
                fi;
-               echo 'Raw Food.com files are missing from /data; downloading from Chameleon Swift.';
-               DOWNLOAD_FLAG='--download-raw';
              fi;
              python src/data/batch_pipeline.py --raw-dir /data --output-dir /output $$DOWNLOAD_FLAG &&
              cp /output/train.csv /training-data/train.csv &&
