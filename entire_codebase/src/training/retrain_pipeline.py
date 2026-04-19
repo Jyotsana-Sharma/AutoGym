@@ -144,18 +144,41 @@ def run_retraining(
     logger.info("  Val CSV:   %s", val_csv)
     logger.info("  Test CSV:  %s", test_csv)
 
+    # Step 0: Refresh training data from live database
+    db_url = os.environ.get("DATABASE_URL")
+    output_dir = str(Path(train_csv).parent)
+    if db_url:
+        logger.info("Step 0/5: Refreshing training data from database...")
+        refresh = subprocess.run(
+            [sys.executable, "-m", "src.data.batch_pipeline",
+             "--output-dir", output_dir,
+             "--raw-dir", "/data"],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "DATABASE_URL": db_url},
+        )
+        if refresh.returncode == 0:
+            logger.info("Training data refreshed from database")
+        else:
+            logger.warning(
+                "Batch pipeline refresh failed (using existing data):\n%s",
+                refresh.stdout[-2000:] + refresh.stderr[-2000:],
+            )
+    else:
+        logger.info("Step 0/5: DATABASE_URL not set — using existing training CSVs")
+
     # Step 1: Data quality checks
     if not skip_data_checks:
-        logger.info("Step 1/5: Running data quality checks...")
+        logger.info("Step 1/6: Running data quality checks...")
         if not run_soda_checks(train_csv, val_csv, test_csv):
             result["failure_reason"] = "Data quality checks failed"
             result["duration_seconds"] = round(time.perf_counter() - start, 2)
             return result
     else:
-        logger.info("Step 1/5: Skipping data quality checks (--skip-data-checks)")
+        logger.info("Step 1/6: Skipping data quality checks (--skip-data-checks)")
 
     # Step 2: Patch config with actual data paths
-    logger.info("Step 2/5: Preparing training config...")
+    logger.info("Step 2/6: Preparing training config...")
     cfg_path = Path(config_path)
     try:
         patched_cfg = patch_config_with_data_paths(cfg_path, train_csv, val_csv, test_csv)
@@ -166,7 +189,7 @@ def run_retraining(
         return result
 
     # Step 3: Train
-    logger.info("Step 3/5: Running training...")
+    logger.info("Step 3/6: Running training...")
     try:
         mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:5000"))
         summary = run_training(patched_cfg)
@@ -198,7 +221,7 @@ def run_retraining(
 
     result["run_id"] = run_id
 
-    # Step 3.5: Safeguarding — fairness check + global explainability
+    # Step 3.5/6: Safeguarding — fairness check + global explainability
     fairness_passed = True
     fairness_summary = "not_run"
     if _SAFEGUARDING_AVAILABLE and run_id:
@@ -258,10 +281,10 @@ def run_retraining(
             fairness_passed = True   # don't block registration on infra errors
             fairness_summary = f"error: {exc}"
     else:
-        logger.info("Step 3.5/5: Safeguarding modules unavailable — skipping")
+        logger.info("Step 3.5/6: Safeguarding modules unavailable — skipping")
 
     # Step 4: Evaluate and register
-    logger.info("Step 4/5: Evaluating quality gates and registering model...")
+    logger.info("Step 4/6: Evaluating quality gates and registering model...")
     if run_id:
         reg_result = evaluate_and_register(
             run_id=run_id,
@@ -281,12 +304,12 @@ def run_retraining(
 
     # Step 5: Auto-promote if requested and registered
     if auto_promote and result["registered"] and result["model_version"]:
-        logger.info("Step 5/5: Auto-promoting to Production...")
+        logger.info("Step 5/6: Auto-promoting to Production...")
         promo_result = promote_to_production(version=result["model_version"])
         result["promoted"] = promo_result.get("promoted", False)
         logger.info("Promotion result: %s", promo_result)
     else:
-        logger.info("Step 5/5: Skipping auto-promotion (manual approval required)")
+        logger.info("Step 5/6: Skipping auto-promotion (manual approval required)")
 
     # Export model file for serving fallback — download directly from run artifacts
     # (not from Production stage, since model is in Staging at this point)
