@@ -194,6 +194,7 @@ services:
       - training-data:/training-data
       - mlflow-artifacts:/app/local/mlartifacts
       - models-cache:/models
+      - ray-results:/app/local/ray_results
     environment:
       <<: *common-env
       TRAIN_CSV: /training-data/train.csv
@@ -204,11 +205,6 @@ services:
       ROLLBACK_WEBHOOK_TOKEN: ${ROLLBACK_WEBHOOK_TOKEN:-}
       ROLLBACK_ALERT_NAMES: ${ROLLBACK_ALERT_NAMES:-HighErrorRate}
       AUTO_PROMOTE: ${AUTO_PROMOTE:-true}
-    volumes:
-      - training-data:/training-data
-      - mlflow-artifacts:/app/local/mlartifacts
-      - models-cache:/models
-      - ray-results:/app/local/ray_results
     command: python -m src.training.retrain_pipeline --config configs/training/xgb_ranker.yaml --auto-promote
 
   retrain-api:
