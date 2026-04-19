@@ -94,6 +94,9 @@ RETRAIN_CRON = os.environ.get("RETRAIN_CRON", "0 2 * * 0")
 # DATA_CHECK_INTERVAL_HOURS: how often to poll for new training data
 DATA_CHECK_INTERVAL_HOURS = int(os.environ.get("DATA_CHECK_INTERVAL_HOURS", "1"))
 
+# AUTO_PROMOTE: automatically promote passing model to Production after training
+AUTO_PROMOTE = os.environ.get("AUTO_PROMOTE", "true").lower() == "true"
+
 # Path to the manifest written by batch-pipeline
 _MANIFEST_PATH = Path(os.environ.get("TRAIN_CSV", "/training-data/train.csv")).parent / "manifest.json"
 
@@ -167,8 +170,8 @@ def _launch_job(reason: str, auto_promote: bool = False) -> bool:
 # ---------------------------------------------------------------------------
 def _weekly_retrain():
     """Forced weekly retraining — runs every Sunday 02:00 UTC by default."""
-    logger.info("Scheduled weekly retrain triggered")
-    launched = _launch_job(reason="weekly_schedule")
+    logger.info("Scheduled weekly retrain triggered (auto_promote=%s)", AUTO_PROMOTE)
+    launched = _launch_job(reason="weekly_schedule", auto_promote=AUTO_PROMOTE)
     scheduled_retrains_total.labels(trigger="weekly").inc()
     if not launched:
         logger.info("Weekly retrain deferred — another job is running")
@@ -187,8 +190,11 @@ def _check_new_data():
         return
 
     if _last_manifest_hash and current_hash != _last_manifest_hash:
-        logger.info("New training data detected (manifest changed) — triggering retrain")
-        launched = _launch_job(reason="new_data")
+        logger.info(
+            "New training data detected (manifest changed) — triggering retrain (auto_promote=%s)",
+            AUTO_PROMOTE,
+        )
+        launched = _launch_job(reason="new_data", auto_promote=AUTO_PROMOTE)
         scheduled_retrains_total.labels(trigger="new_data").inc()
         if not launched:
             logger.info("New-data retrain deferred — another job is running")
@@ -287,6 +293,10 @@ def _extract_firing_alert_names(payload: AlertRollbackRequest) -> set[str]:
 # ---------------------------------------------------------------------------
 @app.post("/trigger")
 def trigger_retrain(req: TriggerRequest, background_tasks: BackgroundTasks):
+    # Apply global AUTO_PROMOTE default unless caller explicitly set it
+    if req.auto_promote is False and AUTO_PROMOTE:
+        req.auto_promote = True
+
     with _job_lock:
         if _current_job["status"] == "running":
             raise HTTPException(status_code=409, detail="A retraining job is already running")
@@ -302,6 +312,7 @@ def trigger_retrain(req: TriggerRequest, background_tasks: BackgroundTasks):
         "accepted": True,
         "triggered_at": _current_job["triggered_at"],
         "reason": req.reason,
+        "auto_promote": req.auto_promote,
     }
 
 
