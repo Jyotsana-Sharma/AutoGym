@@ -71,8 +71,7 @@ A unified ML project: data → features → training → evaluation → registry
 │
 ├── scripts/                       ← Operational + dev utilities
 │   ├── smoke_test.py              ← CI smoke test (health + prediction + latency SLA)
-│   ├── benchmark.py               ← Load testing + latency profiling
-│   └── setup-sparkyfitness.sh     ← Local helper to apply the SparkyFitness integration
+│   └── benchmark.py               ← Load testing + latency profiling
 │
 ├── sparkyfitness-integration/     ← Patch set applied to SparkyFitness by setup container
 │   ├── apply_integration.py       ← Idempotent route/UI patcher used by docker-compose
@@ -83,11 +82,6 @@ A unified ML project: data → features → training → evaluation → registry
 │   ├── RAW_recipes.csv
 │   ├── RAW_interactions.csv
 │   ├── PP_recipes.csv / PP_users.csv / ingr_map.pkl
-│
-├── output/                        ← Generated pipeline outputs (gitignored in prod)
-│   ├── train.csv / val.csv / test.csv
-│   ├── enriched_recipes.csv
-│   └── manifest.json              ← SHA-256 hashes + git commit for reproducibility
 │
 ├── docker-compose.yml             ← Single unified compose (all services, one context)
 ├── Makefile                       ← Runbook: setup, train, promote, rollback, ...

@@ -18,6 +18,7 @@ dist/
 build/
 
 # Generated data / artifacts — managed by pipeline, not git
+output/
 sparky-data-pipeline/output/
 AutoGym-main/*.csv
 

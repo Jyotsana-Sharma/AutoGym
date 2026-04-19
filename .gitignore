@@ -1,31 +1,45 @@
-sparky-data-pipeline/data/
+# Environment / credentials
 .env
+kaggle.json
+.kaggle/
+app-cred-*.sh
+*openrc*.sh
 sparky-data-pipeline/.CHI-251409-openrc.sh
 .CHI-251409-openrc.sh
+
+# Local virtual environments
+.venv/
+venv/
+.venv-sparky*
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Generated data / artifacts
 .data
 .output
-.venv
-.venv-sparky
-.venv-sparky-ingest
-.venv-sparky-generate
-.venv-sparky-online-demo
-.venv-sparky-batch
-.venv-sparky-all
-.venv-sparky-teardown
-.venv-sparky-setup
-.venv-sparky-build
-.venv-sparky-clean
-.venv-sparky-enrich
-.venv-sparky-ingest-to-object-store
-.venv-sparky-generate-training-table
-.venv-sparky-ingest-to-object-store-batch
-.venv-sparky-generate-training-table-batch
-.venv-sparky-online-feature-demo
-.venv-sparky-ingest-to-object-store-online-demo
-.venv-sparky-generate-training-table-online-demo
 sparky-data-pipeline/data/
-entire codebase/data/
-entire codebase/output/
+sparky-data-pipeline/output/
+AutoGym-main/*.csv
+AutoGym-main/local/
 entire_codebase/data/*.csv
 entire_codebase/data/*.pkl
 entire_codebase/output/*.csv
+
+# MLflow local state
+mlruns/
+mlartifacts/
+
+# Archives / local OS and IDE files
+*.zip
+.DS_Store
+.idea/
+.vscode/
+*.swp
+.COURSE_CONCEPT_ALIGNMENT.md
+

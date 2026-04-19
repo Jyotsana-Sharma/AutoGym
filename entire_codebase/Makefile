@@ -51,10 +51,6 @@ help:
 # ---------------------------------------------------------------------------
 # Setup & Build
 # ---------------------------------------------------------------------------
-setup-sparky:
-	@echo "Setting up SparkyFitness integration..."
-	@bash scripts/setup-sparkyfitness.sh
-
 setup: build run-infra
 	@echo "Waiting for infrastructure..."
 	@sleep 10

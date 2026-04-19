@@ -64,7 +64,7 @@ The result is recommendations that are either nutritionally inappropriate, poten
 ### Core Approach
 
 - **Learning to Rank** using XGBoost LambdaRank (`rank:ndcg` objective).
-- Each (user, recipe) pair is represented as a 44-dimensional feature vector combining recipe attributes, user nutritional targets, allergen flags, and PCA-encoded cooking history.
+- Each (user, recipe) pair is represented as a 47-feature vector combining recipe attributes, user nutritional targets, allergen flags, and PCA-encoded cooking history.
 - At inference time, a ranked list of candidate recipes is returned for each user in under 100 ms.
 
 ### Key Differentiators
@@ -143,7 +143,7 @@ The result is recommendations that are either nutritionally inappropriate, poten
 │    ├─ app_onnx.py         — ONNX Runtime (CPU-optimized)                    │
 │    └─ Triton backend      — NVIDIA GPU inference                            │
 │                                                                             │
-│  Feature assembly (44-dim) → DMatrix → ranked predictions                  │
+│  Feature assembly (47 features) → DMatrix → ranked predictions             │
 │  Prometheus metrics: request count, latency, error rate                     │
 │  Benchmarking: scripts/benchmark.py                                         │
 │                                                                             │
@@ -255,7 +255,7 @@ Real-time feature computation at inference time — designed for sub-100 ms end-
 |---|---|
 | `get_user_features(user_id)` | Returns macro targets; checks memory cache → PostgreSQL cache table → historical interactions → defaults |
 | `rule_filter(context)` | Hard removes allergen-flagged and calorie-out-of-range recipes; tracks filter latency |
-| `compute_features(user_id, context)` | Assembles 44-dim feature matrix; adds meal_type and time_of_day context features |
+| `compute_features(user_id, context)` | Assembles the ranking feature matrix; adds user, recipe, nutrition, allergen, and history features |
 
 **Timing Breakdown Target** (< 100 ms total):
 - `user_features_ms`: user preference lookup
@@ -354,7 +354,7 @@ CREATE TABLE user_features_cache (
 
 **Repository**: `AutoGym-main/`
 
-#### 5.2.1 Feature Schema (44 Columns)
+#### 5.2.1 Feature Schema (47 Features)
 
 | Category | Features |
 |---|---|
@@ -443,7 +443,7 @@ Multiple versioned configs allow structured hyperparameter sweeps tracked by MLf
 
 Mirrors the training pipeline exactly to prevent train/serve skew:
 1. Extract `user_id` and `recipe_id` from the instance dict.
-2. For each of 44 feature columns: fill missing with `0.0`.
+2. For each ranking feature column: fill missing with `0.0`.
 3. String columns: sorted-unique integer mapping (unknown → -1).
 4. All values → `float32`.
 5. Set XGBoost group size = number of instances.
@@ -576,7 +576,7 @@ This provides the model with a compact representation of "who this user is" as a
 ### 7.4 Inference Logic
 
 ```
-PredictRequest.instances (list of 44-feature dicts)
+PredictRequest.instances (list of feature dicts)
     ↓
 assemble_features() → float32 matrix + user_ids + recipe_ids
     ↓
@@ -603,27 +603,16 @@ PredictResponse.predictions [{user_id, recipe_id, score, rank}]
 
 ### 8.2 Container Architecture
 
-Each sub-project is fully containerized:
+The integrated system is containerized from `entire_codebase/` with one
+multi-stage `Dockerfile` and one `docker-compose.yml`.
 
-**sparky-data-pipeline** (`docker-compose.yml`):
+| Compose profile | Purpose |
+|---|---|
+| `pipeline` | First bootstrap or intentional retraining: app setup, data compilation, training, serving, monitoring |
+| `runtime` | Normal steady-state operation: app, serving, retrain API, drift monitor, MLflow, Postgres, Prometheus, Grafana |
 
-| Service | Profile | Description |
-|---|---|---|
-| `postgres` | always | PostgreSQL 15, port 5433 |
-| `ingest` | ingest | Raw data upload to Swift |
-| `data-generator` | generate | Synthetic interaction replay |
-| `online-feature-demo` | online-demo | Feature pipeline demo |
-| `batch-pipeline` | batch | Versioned dataset compilation |
-| `soda-checks` | soda | Data quality validation |
-
-**AutoGym-main**:
-- `Dockerfile` — Training container (Python 3.11, XGBoost, Ray)
-- `Dockerfile.mlflow` — MLflow tracking server
-- `docker-compose.mlops.yml` — Composes training + MLflow server
-
-**AutoGym-serving**:
-- `Dockerfile.baseline` / `.onnx` / `.optimized` / `.triton` — Four variants
-- `docker-compose-baseline/onnx/optimized/triton.yaml` — Per-variant deployment
+Legacy role-owned Dockerfiles were removed so the repository reflects the
+single integrated system rather than the earlier split role prototypes.
 
 ### 8.3 Orchestration (Makefile)
 
@@ -868,6 +857,7 @@ model artifact
 | **Object Storage** | Chameleon OpenStack Swift | — | Versioned dataset storage |
 | **Data Quality** | Soda Core | — | Automated validation checks |
 | **Monitoring** | Prometheus | — | Metrics scraping |
+| | Grafana | — | Dashboards and alerting |
 | | FastAPI Instrumentator | 7.0.0+ | Auto-instrumentation |
 | **Containerization** | Docker | — | Reproducible environments |
 | | Docker Compose | — | Multi-service orchestration |
@@ -906,13 +896,18 @@ model artifact
 - [x] Allergen safety enforcement as hard rule filters before ML ranking
 - [x] PCA-based user cooking history embeddings (6 components)
 - [x] Continuous learning flywheel (data generator → batch pipeline → retraining)
+- [x] Unified Docker Compose deployment under `entire_codebase/`
+- [x] SparkyFitness Foods page integration using `RecipeRecommendations`
+- [x] MLflow model registry with quality gates, promotion, and rollback
+- [x] Safeguarding implementation: fairness, explainability, transparency, privacy, accountability, robustness
+- [x] Prometheus/Grafana monitoring stack with serving and retraining metrics
+- [x] Course concept alignment documented in `entire_codebase/COURSE_CONCEPT_ALIGNMENT.md`
+- [x] Shared `request_id` / `recommendation_id` across SparkyFitness feedback and ML prediction logs
+- [x] Authenticated Grafana rollback webhook for selected critical alerts
+- [x] Train/serve feature contract test plus model and dataset cards
 
-### Future Work
+### Final Validation Before Freeze
 
-#### Join Responsibilties
-- [ ] The end-to-end plumbing needed for operation is in place, including movement of production data through the system, capture of feedback or outcomes, preparation of training data, retraining, evaluation, packaging, deployment, and rollback or update. These workflows should run through automation with minimal human work (e.g. you can choose to require manual approval of promotion from a canary environment to production, but not “engineer must SSH into the instance and run these commands to promote from canary environment to production”.)
-- [ ] The complementary ML feature is implemented in the selected open source service itself, so that the feature is used in the regular user flow. (You may find it helpful to use an AI agent to help with this part, since the open source service may be a large, complex, codebase and possibly written in a language you are unfamiliar with.)
-- [ ] “Bonus” items from the previous stage should also be integrated, in order for them to be credited in the “initial implementation” stage.
-- [ ] Safeguarding plan: the team must deliver a safeguarding plan and implement it within the system. This plan should take active steps with concrete mechanisms to support fairness, explainability, transparency, privacy, accountability, and robustness principles (as discussed in lecture).
+- [ ] Run full TypeScript validation and `promtool` checks in the deployment environment before the final freeze.
 
 ---
