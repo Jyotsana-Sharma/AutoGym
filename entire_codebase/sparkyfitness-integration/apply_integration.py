@@ -26,6 +26,12 @@ COPIES = [
     ("SparkyFitnessFrontend/src/api/recommendations.ts", "SparkyFitnessFrontend/src/api/recommendations.ts"),
     ("SparkyFitnessFrontend/src/hooks/Foods/useRecommendations.ts", "SparkyFitnessFrontend/src/hooks/Foods/useRecommendations.ts"),
     ("SparkyFitnessFrontend/src/pages/Foods/RecipeRecommendations.tsx", "SparkyFitnessFrontend/src/pages/Foods/RecipeRecommendations.tsx"),
+    # Replaces the upstream OpenFoodFacts service with the fixed version:
+    # - Uses search.openfoodfacts.org (new API, not deprecated cgi/search.pl)
+    # - Parses `hits` array in search results
+    # - Handles brands field as array or comma-separated string
+    ("SparkyFitnessServer/integrations/openfoodfacts/openFoodFactsService.ts",
+     "SparkyFitnessServer/integrations/openfoodfacts/openFoodFactsService.ts"),
 ]
 
 

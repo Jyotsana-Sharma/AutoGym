@@ -224,7 +224,7 @@ function mapOpenFoodFactsProduct(
     product.product_name;
   return {
     name,
-    brand: product.brands?.split(',')[0]?.trim() || '',
+    brand: (Array.isArray(product.brands) ? product.brands[0] : product.brands?.split(',')[0])?.trim() || '',
     barcode: normalizeBarcode(product.code),
     provider_external_id: product.code,
     provider_type: 'openfoodfacts',

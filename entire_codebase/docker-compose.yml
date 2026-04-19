@@ -411,13 +411,13 @@ services:
     volumes:
       - ./sparkyfitness-integration/SparkyFitnessServer/db/add_recommendations.sql:/migration.sql:ro
     entrypoint: ["/bin/sh", "-c"]
-    command: >
-      "sleep 10 &&
-       psql -h sparkyfitness-db
-            -U ${SPARKY_FITNESS_DB_USER:-sparky}
-            -d ${SPARKY_FITNESS_DB_NAME:-sparkyfitness_db}
-            -f /migration.sql &&
-       echo 'Recommendation migration applied.'"
+    command: >-
+      sleep 10 &&
+      psql -h sparkyfitness-db
+           -U ${SPARKY_FITNESS_DB_USER:-sparky}
+           -d ${SPARKY_FITNESS_DB_NAME:-sparkyfitness_db}
+           -f /migration.sql &&
+      echo 'Recommendation migration applied.'
 
   sparkyfitness-frontend:
     build:

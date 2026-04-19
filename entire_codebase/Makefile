@@ -86,9 +86,20 @@ run-sparkyfitness:
 	@echo "SparkyFitness running at $(SPARKY_URL)"
 
 run-all:
+	@# Ensure SparkyFitness submodule is initialised (safe to run on every boot)
+	@if [ ! -f SparkyFitness/package.json ]; then \
+	    echo "Initialising SparkyFitness submodule..."; \
+	    git submodule update --init --recursive; \
+	fi
+	@# Create root .env from template when missing so compose can read variables
+	@if [ ! -f .env ]; then \
+	    echo "Creating .env from .env.example..."; \
+	    cp .env.example .env; \
+	fi
 	$(COMPOSE) --profile pipeline up -d --build
 	@echo ""
 	@echo "System running:"
+	@echo "  SparkyFitness: $(SPARKY_URL)"
 	@echo "  Serving:      $(SERVING_URL)"
 	@echo "  MLflow:       $(MLFLOW_URL)"
 	@echo "  Grafana:      http://localhost:3000  (admin / sparky_admin)"
