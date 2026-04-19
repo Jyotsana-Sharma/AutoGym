@@ -9,24 +9,21 @@ Endpoints:
 
 Automatic retraining (runs inside the container — no GitHub Actions needed):
   1. Weekly forced retrain  — every Sunday 02:00 UTC (configurable via RETRAIN_CRON)
-  2. New-data detection     — checks training manifest every hour; retrains if
-                              batch-pipeline has produced a new dataset since last run
+  2. Drift-triggered        — drift_monitor.py POSTs /trigger when >30% of features drift
 
 Invoked by:
   - drift_monitor.py when drift exceeds threshold
-  - in-process APScheduler (weekly + data-influx)
+  - in-process APScheduler (weekly cron)
   - HTTP webhook from any external caller
 """
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -69,8 +66,7 @@ alert_rollbacks_total = Counter(
 )
 scheduled_retrains_total = Counter(
     "sparky_scheduled_retrains_total",
-    "Total retraining jobs triggered by the in-process scheduler",
-    ["trigger"],
+    "Total retraining jobs triggered by the weekly in-process scheduler",
 )
 
 # ---------------------------------------------------------------------------
@@ -78,9 +74,6 @@ scheduled_retrains_total = Counter(
 # ---------------------------------------------------------------------------
 _job_lock = threading.Lock()
 _current_job: dict[str, Any] = {"status": "idle", "result": None, "triggered_at": None}
-
-# Last seen manifest hash — used for new-data detection
-_last_manifest_hash: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -91,14 +84,8 @@ _last_manifest_hash: str = ""
 #   format  → "minute hour day month day_of_week"
 RETRAIN_CRON = os.environ.get("RETRAIN_CRON", "0 2 * * 0")
 
-# DATA_CHECK_INTERVAL_HOURS: how often to poll for new training data
-DATA_CHECK_INTERVAL_HOURS = int(os.environ.get("DATA_CHECK_INTERVAL_HOURS", "1"))
-
 # AUTO_PROMOTE: automatically promote passing model to Production after training
 AUTO_PROMOTE = os.environ.get("AUTO_PROMOTE", "true").lower() == "true"
-
-# Path to the manifest written by batch-pipeline
-_MANIFEST_PATH = Path(os.environ.get("TRAIN_CSV", "/training-data/train.csv")).parent / "manifest.json"
 
 
 # ---------------------------------------------------------------------------
@@ -172,34 +159,9 @@ def _weekly_retrain():
     """Forced weekly retraining — runs every Sunday 02:00 UTC by default."""
     logger.info("Scheduled weekly retrain triggered (auto_promote=%s)", AUTO_PROMOTE)
     launched = _launch_job(reason="weekly_schedule", auto_promote=AUTO_PROMOTE)
-    scheduled_retrains_total.labels(trigger="weekly").inc()
+    scheduled_retrains_total.inc()
     if not launched:
         logger.info("Weekly retrain deferred — another job is running")
-
-
-def _check_new_data():
-    """Hourly check: retrain if batch-pipeline wrote a new manifest since last run."""
-    global _last_manifest_hash
-
-    if not _MANIFEST_PATH.exists():
-        return
-
-    try:
-        current_hash = hashlib.md5(_MANIFEST_PATH.read_bytes()).hexdigest()
-    except OSError:
-        return
-
-    if _last_manifest_hash and current_hash != _last_manifest_hash:
-        logger.info(
-            "New training data detected (manifest changed) — triggering retrain (auto_promote=%s)",
-            AUTO_PROMOTE,
-        )
-        launched = _launch_job(reason="new_data", auto_promote=AUTO_PROMOTE)
-        scheduled_retrains_total.labels(trigger="new_data").inc()
-        if not launched:
-            logger.info("New-data retrain deferred — another job is running")
-
-    _last_manifest_hash = current_hash
 
 
 # ---------------------------------------------------------------------------
@@ -223,19 +185,8 @@ async def lifespan(app: FastAPI):
         id="weekly_retrain",
         replace_existing=True,
     )
-    scheduler.add_job(
-        _check_new_data,
-        "interval",
-        hours=DATA_CHECK_INTERVAL_HOURS,
-        id="data_influx_check",
-        replace_existing=True,
-    )
     scheduler.start()
-    logger.info(
-        "Scheduler started: weekly retrain (cron=%s UTC) + data check every %dh",
-        RETRAIN_CRON,
-        DATA_CHECK_INTERVAL_HOURS,
-    )
+    logger.info("Scheduler started: weekly retrain cron=%s UTC", RETRAIN_CRON)
     yield
     scheduler.shutdown(wait=False)
     logger.info("Scheduler stopped")
@@ -328,10 +279,6 @@ def get_schedule():
     return {
         "weekly_retrain_cron": RETRAIN_CRON,
         "weekly_retrain_description": "Every Sunday 02:00 UTC (override with RETRAIN_CRON env var)",
-        "data_check_interval_hours": DATA_CHECK_INTERVAL_HOURS,
-        "manifest_path": str(_MANIFEST_PATH),
-        "manifest_exists": _MANIFEST_PATH.exists(),
-        "last_manifest_hash": _last_manifest_hash or "not_yet_checked",
     }
 
 
