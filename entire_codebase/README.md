@@ -72,7 +72,6 @@ A unified ML project: data → features → training → evaluation → registry
 ├── scripts/                       ← Operational + dev utilities
 │   ├── smoke_test.py              ← CI smoke test (health + prediction + latency SLA)
 │   ├── benchmark.py               ← Load testing + latency profiling
-│   ├── convert_to_onnx.py         ← XGBoost → ONNX format conversion (optional)
 │   └── setup-sparkyfitness.sh     ← Local helper to apply the SparkyFitness integration
 │
 ├── sparkyfitness-integration/     ← Patch set applied to SparkyFitness by setup container

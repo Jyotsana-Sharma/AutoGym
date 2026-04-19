@@ -4,7 +4,7 @@ Load testing / benchmarking script for the SparkyFitness meal recommendation API
 Supports both FastAPI (/predict) and Triton (/v2/models/.../infer) backends.
 
 Usage:
-    # FastAPI (baseline, onnx, optimized)
+    # FastAPI
     python benchmark.py --url http://localhost:8000 --num-requests 500
 
     # Triton
