@@ -43,10 +43,7 @@ All variables have safe defaults for local development. You only need to change 
 - You want a custom Grafana password
 
 ```bash
-# Copy the example env file
-cp .env.example .env
-
-# Edit only what you need (everything has defaults — this step is optional)
+# Edit only what you need (the current repo snapshot already includes `.env`)
 nano .env
 ```
 
@@ -191,10 +188,10 @@ curl -s -X POST http://localhost:8000/explain \
 ## Scenario B — Full Stack with SparkyFitness Integration
 
 Everything needed is already in this repo:
-- `sparkyfitness-integration/` — the ML recommendation patch files for SparkyFitness
+- `sparkyfitness-integration/` — the ML recommendation patch files plus `apply_integration.py`
 - `docker-compose.yml` — SparkyFitness containers (`sparkyfitness-db`, `sparkyfitness-server`, `sparkyfitness-frontend`) already wired with `ML_RECOMMENDATION_URL=http://sparky-serving:8000`
-- `scripts/setup-sparkyfitness.sh` — applies all patches automatically
-- `.env.sparky.example` — all environment variables with safe defaults
+- `sparkyfitness-integration/apply_integration.py` — idempotent integration helper used in Docker builds and optional manual setup
+- `.env` — current environment values for this repo snapshot
 
 ### Two commands to run everything
 
@@ -212,10 +209,10 @@ git submodule update --init --recursive
 docker compose --profile pipeline up -d
 ```
 
-The `sparkyfitness-setup` container runs automatically first — no manual script needed. It runs `sparkyfitness-integration/apply_integration.py`, copies all integration patch files into the SparkyFitness source, patches `SparkyFitnessServer.ts` to register `/api/recommendations`, patches `Foods.tsx` to render `RecipeRecommendations`, and creates `SparkyFitness/.env`. Only after it exits successfully do `sparkyfitness-server` and `sparkyfitness-frontend` start.
+SparkyFitness integration is applied during the Docker image builds. The optional `sparkyfitness-setup` container exists only under the `manual-setup` profile when you intentionally want to patch a local host checkout for debugging.
 
-This starts 14 services in the correct order. `batch-pipeline`, `trainer`, and
-`sparkyfitness-setup` run once and exit; the app, serving, retraining, database,
+This starts 12 services in the correct order. `batch-pipeline`, `trainer`, and
+`sparkyfitness-migrate` run once and exit; the app, serving, retraining, database,
 and monitoring services stay running at steady state.
 
 After the first successful bootstrap, you can restart or operate only the
@@ -225,23 +222,24 @@ steady-state system with the smaller runtime profile:
 docker compose --profile runtime up -d
 ```
 
-The runtime profile starts 11 services and skips the one-shot containers
-`sparkyfitness-setup`, `batch-pipeline`, and `trainer`. Use the full `pipeline`
-profile again whenever you intentionally want to rebuild training data and
+The runtime profile starts 10 services. It skips the pipeline-only jobs
+`batch-pipeline` and `trainer`; `sparkyfitness-migrate` still runs once to
+apply the recommendation schema migration. Use the full `pipeline` profile
+again whenever you intentionally want to rebuild training data and
 train/register a fresh model from scratch. Normal runtime startup does not
 retrain; serving loads the current Production model from MLflow Registry.
 
 ```
-postgres + mlflow
-      ↓
-batch-pipeline (compile training data)        sparkyfitness-setup (copy patches, create .env)
-      ↓  exits 0                                      ↓  exits 0
-trainer (XGBoost + fairness gate + MLflow)    sparkyfitness-db (healthy)
-      ↓  exits 0                                      ↓
-sparky-serving  ←─────────────────────────┐  sparkyfitness-server ──────────────────────┘
-retrain-api                               │  sparkyfitness-frontend (port 3004)
-drift-monitor                             │  ML_RECOMMENDATION_URL=http://sparky-serving:8000
-prometheus + grafana alerting             │  (both on sparky-net — talk by container name)
+postgres + mlflow                              sparkyfitness-db (healthy)
+      ↓                                                 ↓
+batch-pipeline (compile training data)          sparkyfitness-server
+      ↓  exits 0                                         ↓
+trainer (XGBoost + fairness gate + MLflow)      sparkyfitness-migrate (schema patch)
+      ↓  exits 0                                         ↓  exits 0
+sparky-serving  ←─────────────────────────┐     sparkyfitness-frontend (port 3004)
+retrain-api                               │     ML_RECOMMENDATION_URL=http://sparky-serving:8000
+drift-monitor                             │     (both on sparky-net — talk by container name)
+prometheus + grafana alerting             │
           └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -346,7 +344,7 @@ serving starts (loads model, serves /predict /explain)
 retrain-api starts
 drift-monitor starts (checks for feature drift every 5 min)
 prometheus + grafana start
-sparkyfitness-setup applies app integration, then SparkyFitness starts
+sparkyfitness-server starts, sparkyfitness-migrate runs once, then sparkyfitness-frontend starts
 ```
 
 If **any step fails** (e.g. fairness gate rejects the model), the chain stops — serving never starts. Fix the issue and re-run the same command.
@@ -453,9 +451,10 @@ docker system prune -a --volumes
 | `sparky-prometheus` | 9090 | Scrapes and stores metrics |
 | `sparky-grafana` | 3000 | Dashboards for latency, drift, training history |
 | `sparky-postgres-exporter` | 9187 | Exports PostgreSQL metrics to Prometheus |
-| `sparkyfitness-setup` | — | Applies the recommendation route/UI integration (runs once then exits) |
+| `sparkyfitness-setup` | — | Manual-only helper that patches a local host checkout (runs once then exits) |
 | `sparkyfitness-db` | — | SparkyFitness application database |
 | `sparkyfitness-server` | 3010 | SparkyFitness API with recommendation bridge |
+| `sparkyfitness-migrate` | — | Applies the recommendation schema migration (runs once then exits) |
 | `sparkyfitness-frontend` | 3004 | SparkyFitness UI with recommendation cards |
 
 ---

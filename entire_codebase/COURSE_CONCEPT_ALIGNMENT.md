@@ -22,7 +22,7 @@ and closing the feedback loop.
 |---|---|---|
 | ML system design | The ML feature is not a standalone notebook; it is integrated into the SparkyFitness Foods user flow, with React → Express → FastAPI → XGBoost → feedback/logging. | `sparkyfitness-integration/`, `SparkyFitness/`, `src/serving/app_production.py` |
 | Chameleon cloud deployment | Deployment guide targets KVM@TACC for runtime and CHI@TACC Swift for object storage. | `CHAMELEON_DEPLOYMENT.md`, `docker-compose.yml` |
-| Reproducible infrastructure | Single multi-stage `Dockerfile`, Docker Compose profiles, Makefile runbook, explicit environment templates. | `Dockerfile`, `docker-compose.yml`, `Makefile`, `.env.example` |
+| Reproducible infrastructure | Single multi-stage `Dockerfile`, Docker Compose profiles, Makefile runbook, and tracked runtime environment configuration. | `Dockerfile`, `docker-compose.yml`, `Makefile`, `.env` |
 | Persistent storage | Uses Docker volumes for Postgres, MLflow DB/artifacts, model cache, Grafana, Prometheus, and SparkyFitness application state. Uses Swift buckets for raw/versioned data. | `docker-compose.yml`, `src/data/ingest_to_object_store.py`, `src/data/batch_pipeline.py` |
 | Data ingestion | Raw Food.com data can be pulled from Swift or local data volume; ingestion validates expected files and schema. | `src/data/ingest_to_object_store.py`, `src/data/batch_pipeline.py` |
 | Data quality at ingestion | Soda checks plus runtime ingestion checks block bad data before training. | `src/data/run_soda_checks.py`, `configs/data/soda_checks.yml`, `src/data/drift_monitor.py` |
@@ -31,8 +31,8 @@ and closing the feedback loop.
 | Model training infrastructure | XGBoost LambdaRank is the production model; Ray config exists for distributed training. | `src/training/train.py`, `src/training/ray_training.py`, `configs/training/xgb_ranker*.yaml` |
 | Experiment tracking | Every run logs metrics, parameters, datasets, configs, artifacts, fairness, and explainability to MLflow. | `src/training/train.py`, `src/training/model_registry.py`, `src/training/retrain_pipeline.py` |
 | Model registry | Models are registered only after gates pass. Serving fetches the current Production model from MLflow Registry; runtime startup does not retrain. | `src/training/model_registry.py`, `src/serving/model_loader.py`, `src/serving/app_production.py` |
-| CI/CD and automation | GitHub Actions performs data quality, training/evaluation/registration, optional promotion, and rollback on failed smoke test. Runtime retraining can be triggered by drift/manual/schedule. | `.github/workflows/retrain.yml`, `src/training/retrain_api.py` |
-| Deployment profiles | `pipeline` bootstraps data/training/app once; `runtime` starts 11 long-running containers and loads model from registry. | `docker-compose.yml`, `project_reproducibility.md` |
+| CI/CD and automation | `retrain_api.py` runs weekly APScheduler retraining in-process, accepts drift/manual triggers, and works with the registry flow plus Make targets for promotion and rollback. | `src/training/retrain_api.py`, `src/data/drift_monitor.py`, `Makefile` |
+| Deployment profiles | `pipeline` bootstraps data/training/app once; `runtime` starts 10 services and loads the current Production model from the registry. | `docker-compose.yml`, `project_reproducibility.md` |
 | Model serving | FastAPI `/predict`, `/feedback`, `/explain`, `/health`, `/metrics`; hot-reloads Production model from registry. | `src/serving/app_production.py`, `src/serving/model_loader.py` |
 | Serving fallback | If MLflow Registry is unavailable, serving falls back to local exported model file. SparkyFitness app also falls back to a protein-proximity heuristic if ML serving is unavailable. | `src/serving/model_loader.py`, `sparkyfitness-integration/SparkyFitnessServer/services/recommendationService.ts` |
 | Offline evaluation | Training evaluates NDCG@10 on held-out test data and compares against baseline. | `src/training/metric.py`, `src/training/train.py` |
@@ -40,7 +40,7 @@ and closing the feedback loop.
 | Online evaluation and monitoring | Prometheus/Grafana monitor serving latency, errors, score distribution, prediction volume, model version, retraining status, and DB metrics. | `src/serving/app_production.py`, `src/training/retrain_api.py`, `monitoring/` |
 | Drift monitoring | KS-test compares live inference features against training baseline every 300 seconds; drift triggers retraining API. | `src/data/drift_monitor.py` |
 | Closing the feedback loop | Serving logs predictions and features to ML Postgres; SparkyFitness forwards UI feedback to ML `/feedback`; shared `request_id` and `recommendation_id` join app feedback with ML logs. | `src/serving/prediction_logger.py`, `sparkyfitness-integration/SparkyFitnessServer/services/recommendationService.ts`, `src/data/batch_pipeline.py` |
-| Human-in-the-loop deployment control | Models register to Staging; promotion to Production can be manual/CI gated. CI rollback and authenticated Grafana rollback restore previous archived Production versions. | `src/training/model_registry.py`, `src/training/retrain_api.py`, `.github/workflows/retrain.yml` |
+| Human-in-the-loop deployment control | Models register to Staging; promotion to Production can be triggered manually via the retrain API / Make targets. Explicit rollback and authenticated Grafana rollback restore previous archived Production versions. | `src/training/model_registry.py`, `src/training/retrain_api.py`, `Makefile` |
 | Safeguarding | Fairness gate, allergen safety, SHAP explanations, transparent model metadata, pseudonymized IDs, retention cleanup, rollback trail, model card, and dataset card. | `safeguarding/`, `SAFEGUARDING_PLAN.md`, `docs/MODEL_CARD.md`, `docs/DATASET_CARD.md` |
 | Operational observability | Grafana dashboards, provisioned Grafana alerting, and Prometheus metrics support production monitoring without a separate Alertmanager container. | `monitoring/grafana/`, `monitoring/prometheus.yml`, `monitoring/alert_rules.yml` |
 | Train/serve contract testing | Serving feature columns are centralized and tested against training feature inference so metadata IDs do not become model inputs. | `src/serving/feature_contract.py`, `src/training/ranking_data.py`, `tests/test_feature_contract.py` |
@@ -61,10 +61,11 @@ docker compose --profile pipeline up -d --build
 docker compose --profile runtime up -d
 ```
 
-`pipeline` includes the one-shot setup/data/training jobs. `runtime` starts only
-the 11 long-running containers. In runtime mode, the model is not retrained on
-startup; `sparky-serving` loads the current Production model from MLflow
-Registry and polls for newer Production versions.
+`pipeline` includes the one-shot data/training jobs. `runtime` starts 10
+services; `sparkyfitness-migrate` runs once to apply the recommendation schema
+migration, and the remaining services continue serving traffic. In runtime
+mode, the model is not retrained on startup; `sparky-serving` loads the current
+Production model from MLflow Registry and polls for newer Production versions.
 
 ---
 

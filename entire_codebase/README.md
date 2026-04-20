@@ -70,10 +70,10 @@ A unified ML project: data → features → training → evaluation → registry
 │   └── recipe_ranker_output.sample.json
 │
 ├── scripts/                       ← Operational + dev utilities
-│   ├── smoke_test.py              ← CI smoke test (health + prediction + latency SLA)
+│   ├── smoke_test.py              ← Serving smoke test (health + prediction + latency SLA)
 │   └── benchmark.py               ← Load testing + latency profiling
 │
-├── sparkyfitness-integration/     ← Patch set applied to SparkyFitness by setup container
+├── sparkyfitness-integration/     ← SparkyFitness integration patches + helper script
 │   ├── apply_integration.py       ← Idempotent route/UI patcher used by docker-compose
 │   ├── SparkyFitnessServer/       ← recommendation route/service/repository/schema
 │   └── SparkyFitnessFrontend/     ← recommendation API hook + Foods page component
@@ -85,10 +85,8 @@ A unified ML project: data → features → training → evaluation → registry
 │
 ├── docker-compose.yml             ← Single unified compose (all services, one context)
 ├── Makefile                       ← Runbook: setup, train, promote, rollback, ...
-├── .env.example                   ← Environment variable template
-├── .gitignore
-└── .github/workflows/
-    └── retrain.yml                ← CI/CD: quality gate → train → evaluate → promote
+├── .env                           ← Environment variable configuration
+└── .gitignore
 ```
 
 ---
@@ -121,8 +119,8 @@ A unified ML project: data → features → training → evaluation → registry
 ## Quick Start
 
 ```bash
-# 1. Configure environment
-cp .env.example .env          # fill in credentials
+# 1. Review environment values
+nano .env                     # update credentials if needed
 
 # 2. Build + start infrastructure
 make setup                    # postgres + mlflow
@@ -177,7 +175,7 @@ docker compose --profile runtime up -d
 
 6. MONITORING + LOOP
                drift_monitor.py: KS test every 5 min → POST /trigger on drift
-               CI smoke-test failure → automated rollback
+               retrain_api.py: weekly APScheduler + manual /promote /rollback
 
 7. SPARKYFITNESS APP FLOW
                Foods page → /api/recommendations → ML /predict
@@ -221,7 +219,7 @@ curl -X POST http://localhost:8080/rollback \
   -H "Content-Type: application/json" -d '{"version":"3"}'
 ```
 
-Automated rollback is implemented in CI after a failed post-promotion smoke test.
+Manual rollback is available through `make rollback` or `POST /rollback`.
 Prometheus and Grafana provide runtime monitoring and alerting. Grafana can also
 call `POST /alerts/rollback` on the retrain API for configured critical alerts
 when `ROLLBACK_WEBHOOK_TOKEN` is set.
@@ -235,5 +233,5 @@ See [safeguarding/SAFEGUARDING_PLAN.md](safeguarding/SAFEGUARDING_PLAN.md):
 - **Explainability** — SHAP attributions per prediction
 - **Transparency** — model version + source in every response, full MLflow lineage
 - **Privacy** — pseudonymized ML IDs, no PII in artifacts, 90-day inference feature retention
-- **Accountability** — retraining metrics/logs, GitHub environment approval gates, rollback trail
-- **Robustness** — drift monitoring, CI rollback after failed promotion, local model fallback
+- **Accountability** — retraining metrics/logs, explicit promotion/rollback trail
+- **Robustness** — drift monitoring, alert-triggered rollback, local model fallback
