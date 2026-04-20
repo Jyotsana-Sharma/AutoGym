@@ -54,6 +54,9 @@ CHECK_INTERVAL_SECONDS = int(os.environ.get("CHECK_INTERVAL_SECONDS", "300"))
 LOOKBACK_HOURS = int(os.environ.get("LOOKBACK_HOURS", "24"))
 MIN_SAMPLES_FOR_DRIFT = int(os.environ.get("MIN_SAMPLES_FOR_DRIFT", "100"))
 TRAINING_BASELINE_PATH = os.environ.get("TRAINING_BASELINE_PATH", "/training-data/train.csv")
+# Cooldown: skip retrain trigger if a successful retrain completed within this many minutes.
+# Prevents drift from pre-retrain rows repeatedly firing new retrains.
+RETRAIN_COOLDOWN_MINUTES = int(os.environ.get("RETRAIN_COOLDOWN_MINUTES", "30"))
 
 # Numeric features to monitor for drift
 NUMERIC_FEATURES = [
@@ -321,6 +324,38 @@ def cleanup_old_inference_features(conn, retention_days: int = 90) -> int:
         return 0
 
 
+def is_retrain_in_cooldown() -> bool:
+    """
+    Return True if a retrain completed recently (within RETRAIN_COOLDOWN_MINUTES).
+    Queries the retrain-api /status endpoint. Returns False on any error so
+    drift detection fails open (triggers) rather than silently suppressing.
+    """
+    retrain_status_url = RETRAIN_WEBHOOK_URL.replace("/trigger", "/status")
+    try:
+        r = requests.get(retrain_status_url, timeout=5)
+        if r.status_code != 200:
+            return False
+        data = r.json()
+        status = data.get("status")
+        triggered_at_str = data.get("triggered_at")
+        if status != "completed" or not triggered_at_str:
+            return False
+        triggered_at = datetime.fromisoformat(triggered_at_str)
+        if triggered_at.tzinfo is None:
+            triggered_at = triggered_at.replace(tzinfo=timezone.utc)
+        age_minutes = (datetime.now(timezone.utc) - triggered_at).total_seconds() / 60
+        if age_minutes < RETRAIN_COOLDOWN_MINUTES:
+            logger.info(
+                "Retrain cooldown active: last retrain completed %.1f min ago (cooldown=%d min)",
+                age_minutes, RETRAIN_COOLDOWN_MINUTES,
+            )
+            return True
+        return False
+    except Exception as exc:
+        logger.debug("Cooldown check failed (ignoring): %s", exc)
+        return False
+
+
 def trigger_retraining(reason: str) -> bool:
     """Send a retraining trigger webhook to the retrain-api service."""
     payload = {
@@ -389,17 +424,23 @@ def run_once(report_only: bool = False) -> dict[str, Any]:
             log_drift_to_db(conn, drift_result)
 
             if drift_result["overall_drift_detected"] and not report_only:
-                logger.warning(
-                    "DRIFT DETECTED in %d/%d features. Triggering retraining.",
-                    drift_result["n_drifted"],
-                    drift_result["n_features_checked"],
-                )
-                triggered = trigger_retraining(
-                    reason=f"drift_detected: {drift_result['drifted_features'][:5]}"
-                )
-                report["actions_taken"].append(
-                    {"action": "trigger_retraining", "success": triggered}
-                )
+                if is_retrain_in_cooldown():
+                    report["actions_taken"].append(
+                        {"action": "trigger_retraining", "skipped": True,
+                         "reason": f"cooldown_active ({RETRAIN_COOLDOWN_MINUTES} min)"}
+                    )
+                else:
+                    logger.warning(
+                        "DRIFT DETECTED in %d/%d features. Triggering retraining.",
+                        drift_result["n_drifted"],
+                        drift_result["n_features_checked"],
+                    )
+                    triggered = trigger_retraining(
+                        reason=f"drift_detected: {drift_result['drifted_features'][:5]}"
+                    )
+                    report["actions_taken"].append(
+                        {"action": "trigger_retraining", "success": triggered}
+                    )
         else:
             n = len(live_df) if live_df is not None else 0
             report["checks"]["inference_drift"] = {
