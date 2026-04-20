@@ -140,8 +140,8 @@ it must be possible to determine who approved the deployment and trace it back.
 **Quality gate approval trail**
 - Every model in the MLflow Registry has `quality_gate_status` and `registered_at` tags
 - Promotion from Staging → Production is either:
-  - Manual: triggered via GitHub Actions `production` environment (requires approval)
-  - Automatic (weekly schedule only): logged in `retraining_log` table
+  - Manual: triggered by an explicit `POST /promote` call (or `make promote`)
+  - Automatic (weekly schedule only): logged in `retraining_log` when `AUTO_PROMOTE` is enabled
 
 **Retraining log** (`retraining_log` table)
 - Every retraining run records: trigger reason, run_id, model version,
@@ -169,20 +169,18 @@ or adversarial inputs.
 
 ### Mechanisms Implemented
 
-**Data drift monitoring** (`sparky-data-pipeline/scripts/drift_monitor.py`)
+**Data drift monitoring** (`src/data/drift_monitor.py`)
 - Kolmogorov-Smirnov test on 19 numeric features every 5 minutes
 - Drift detected if > 30% of features show statistically significant shift (p < 0.05)
 - Automatic retraining trigger sent to retrain-api on detection
 
-**Automated rollback** (CI/CD + model registry)
-- CI promotes only registered models that pass the NDCG, production-regression,
-  and fairness gates
-- A post-promotion smoke test runs against the live serving API
-- If the smoke test fails, the rollback stage calls `model_registry.rollback`
-  and hot-reloads serving
+**Rollback controls** (runtime alerts + model registry)
+- Retraining and promotion only act on models that pass the NDCG,
+  production-regression, and fairness gates
+- Manual rollback is available through `POST /rollback` (or `make rollback`)
 - Prometheus alerts surface `LowPredictionScores`, `HighErrorRate`, stale
-  models, and logging lag; Grafana provisions a critical `HighErrorRate`
-  rollback route to `POST /alerts/rollback`
+models, and logging lag; Grafana provisions a critical `HighErrorRate`
+rollback route to `POST /alerts/rollback`
 
 **Model fallback**
 - If MLflow Registry is unreachable, serving falls back to a local model file
@@ -214,8 +212,8 @@ or adversarial inputs.
 | Explainability  | SHAP per-request + global importance | `safeguarding/explainability.py` | Yes |
 | Transparency    | Model version in response, MLflow lineage | `app_production.py`, MLflow | Yes |
 | Privacy         | Pseudonymized IDs, no PII in models, 90-day retention | `drift_monitor.py`, DB schema, pipeline design | Yes |
-| Accountability  | Retraining metrics/logs, approval gates, rollback trail | `retrain_api.py`, MLflow, GitHub Environments | Yes |
-| Robustness      | Drift monitoring, CI/Grafana rollback, fallback model | `drift_monitor.py`, alerts, `model_loader.py`, `retrain_api.py` | Yes |
+| Accountability  | Retraining metrics/logs, explicit promotion/rollback trail | `retrain_api.py`, MLflow, `Makefile` | Yes |
+| Robustness      | Drift monitoring, alert-triggered rollback, fallback model | `drift_monitor.py`, alerts, `model_loader.py`, `retrain_api.py` | Yes |
 
 ---
 
