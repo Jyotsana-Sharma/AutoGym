@@ -43,7 +43,10 @@ All variables have safe defaults for local development. You only need to change 
 - You want a custom Grafana password
 
 ```bash
-# Edit only what you need (the current repo snapshot already includes `.env`)
+# Copy the example env file
+cp .env.example .env
+
+# Edit only what you need (everything has defaults — this step is optional)
 nano .env
 ```
 
@@ -188,10 +191,10 @@ curl -s -X POST http://localhost:8000/explain \
 ## Scenario B — Full Stack with SparkyFitness Integration
 
 Everything needed is already in this repo:
-- `sparkyfitness-integration/` — the ML recommendation patch files plus `apply_integration.py`
+- `sparkyfitness-integration/` — the ML recommendation patch files for SparkyFitness
 - `docker-compose.yml` — SparkyFitness containers (`sparkyfitness-db`, `sparkyfitness-server`, `sparkyfitness-frontend`) already wired with `ML_RECOMMENDATION_URL=http://sparky-serving:8000`
-- `sparkyfitness-integration/apply_integration.py` — idempotent integration helper used in Docker builds and optional manual setup
-- `.env` — current environment values for this repo snapshot
+- `scripts/setup-sparkyfitness.sh` — applies all patches automatically
+- `.env.sparky.example` — all environment variables with safe defaults
 
 ### Two commands to run everything
 
@@ -209,10 +212,10 @@ git submodule update --init --recursive
 docker compose --profile pipeline up -d
 ```
 
-SparkyFitness integration is applied during the Docker image builds. The optional `sparkyfitness-setup` container exists only under the `manual-setup` profile when you intentionally want to patch a local host checkout for debugging.
+The `sparkyfitness-setup` container runs automatically first — no manual script needed. It runs `sparkyfitness-integration/apply_integration.py`, copies all integration patch files into the SparkyFitness source, patches `SparkyFitnessServer.ts` to register `/api/recommendations`, patches `Foods.tsx` to render `RecipeRecommendations`, and creates `SparkyFitness/.env`. Only after it exits successfully do `sparkyfitness-server` and `sparkyfitness-frontend` start.
 
-This starts 12 services in the correct order. `batch-pipeline`, `trainer`, and
-`sparkyfitness-migrate` run once and exit; the app, serving, retraining, database,
+This starts 14 services in the correct order. `batch-pipeline`, `trainer`, and
+`sparkyfitness-setup` run once and exit; the app, serving, retraining, database,
 and monitoring services stay running at steady state.
 
 After the first successful bootstrap, you can restart or operate only the
@@ -222,24 +225,23 @@ steady-state system with the smaller runtime profile:
 docker compose --profile runtime up -d
 ```
 
-The runtime profile starts 10 services. It skips the pipeline-only jobs
-`batch-pipeline` and `trainer`; `sparkyfitness-migrate` still runs once to
-apply the recommendation schema migration. Use the full `pipeline` profile
-again whenever you intentionally want to rebuild training data and
+The runtime profile starts 11 services and skips the one-shot containers
+`sparkyfitness-setup`, `batch-pipeline`, and `trainer`. Use the full `pipeline`
+profile again whenever you intentionally want to rebuild training data and
 train/register a fresh model from scratch. Normal runtime startup does not
 retrain; serving loads the current Production model from MLflow Registry.
 
 ```
-postgres + mlflow                              sparkyfitness-db (healthy)
-      ↓                                                 ↓
-batch-pipeline (compile training data)          sparkyfitness-server
-      ↓  exits 0                                         ↓
-trainer (XGBoost + fairness gate + MLflow)      sparkyfitness-migrate (schema patch)
-      ↓  exits 0                                         ↓  exits 0
-sparky-serving  ←─────────────────────────┐     sparkyfitness-frontend (port 3004)
-retrain-api                               │     ML_RECOMMENDATION_URL=http://sparky-serving:8000
-drift-monitor                             │     (both on sparky-net — talk by container name)
-prometheus + grafana alerting             │
+postgres + mlflow
+      ↓
+batch-pipeline (compile training data)        sparkyfitness-setup (copy patches, create .env)
+      ↓  exits 0                                      ↓  exits 0
+trainer (XGBoost + fairness gate + MLflow)    sparkyfitness-db (healthy)
+      ↓  exits 0                                      ↓
+sparky-serving  ←─────────────────────────┐  sparkyfitness-server ──────────────────────┘
+retrain-api                               │  sparkyfitness-frontend (port 3004)
+drift-monitor                             │  ML_RECOMMENDATION_URL=http://sparky-serving:8000
+prometheus + grafana alerting             │  (both on sparky-net — talk by container name)
           └──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -305,6 +307,23 @@ make smoke-test     # verify serving is healthy
 
 ---
 
+## Production Traffic Emulation (data-generator)
+
+The data-generator replays held-out test interactions through the serving layer, emulating real production traffic. It is started **manually** after the system is up:
+
+```bash
+# Start after docker compose --profile pipeline up completes
+docker compose --profile data up -d data-generator
+docker logs sparky-data-generator -f
+```
+
+This populates `inference_features` in PostgreSQL. The drift monitor checks these rows every 5 minutes and triggers retraining if >30% of features show distributional shift (KS p-value < 0.01 AND KS statistic ≥ 0.1).
+
+To force an immediate drift check:
+```bash
+docker exec sparky-drift-monitor python src/data/drift_monitor.py --once
+```
+
 ## Generating Fresh Training Data
 
 If you want to populate the database with fresh synthetic user interactions before training:
@@ -344,7 +363,7 @@ serving starts (loads model, serves /predict /explain)
 retrain-api starts
 drift-monitor starts (checks for feature drift every 5 min)
 prometheus + grafana start
-sparkyfitness-server starts, sparkyfitness-migrate runs once, then sparkyfitness-frontend starts
+sparkyfitness-setup applies app integration, then SparkyFitness starts
 ```
 
 If **any step fails** (e.g. fairness gate rejects the model), the chain stops — serving never starts. Fix the issue and re-run the same command.
@@ -444,17 +463,16 @@ docker system prune -a --volumes
 | `sparky-mlflow` | 5000 | Tracks experiments, stores model artifacts, manages registry |
 | `sparky-serving` | 8000 | Serves `/predict`, `/explain`, `/health`, `/metrics` |
 | `sparky-retrain-api` | 8080 | Receives retraining webhook triggers |
-| `sparky-data-generator` | — | Continuously generates synthetic user interactions |
+| `sparky-data-generator` | — | Replays test.csv interactions through serving, emulating production traffic (started manually) |
 | `sparky-batch-pipeline` | — | Compiles train/val/test CSVs (runs once then exits) |
 | `sparky-trainer` | — | Trains XGBoost model (runs once then exits) |
 | `sparky-drift-monitor` | — | KS-test on 19 features every 5 minutes |
 | `sparky-prometheus` | 9090 | Scrapes and stores metrics |
 | `sparky-grafana` | 3000 | Dashboards for latency, drift, training history |
 | `sparky-postgres-exporter` | 9187 | Exports PostgreSQL metrics to Prometheus |
-| `sparkyfitness-setup` | — | Manual-only helper that patches a local host checkout (runs once then exits) |
+| `sparkyfitness-setup` | — | Applies the recommendation route/UI integration (runs once then exits) |
 | `sparkyfitness-db` | — | SparkyFitness application database |
 | `sparkyfitness-server` | 3010 | SparkyFitness API with recommendation bridge |
-| `sparkyfitness-migrate` | — | Applies the recommendation schema migration (runs once then exits) |
 | `sparkyfitness-frontend` | 3004 | SparkyFitness UI with recommendation cards |
 
 ---
@@ -468,8 +486,8 @@ docker system prune -a --volumes
 | `ROLLBACK_WEBHOOK_TOKEN` | _(empty)_ | grafana, retrain-api | Bearer token required before Grafana alert rollback is enabled |
 | `ROLLBACK_ALERT_NAMES` | `HighErrorRate` | retrain-api | Comma-separated critical alert names allowed to trigger rollback |
 | `MLFLOW_TRACKING_URI` | `http://mlflow:5000` | trainer, serving | MLflow server address |
-| `NDCG_THRESHOLD` | `0.55` in Compose env | trainer | Minimum NDCG@10 to register model. The code fallback is `0.79` if this env var is not set. |
-| `DRIFT_THRESHOLD` | `0.01` in Compose env | drift-monitor | KS-test p-value threshold. Drift also requires `MIN_KS_STATISTIC >= 0.1` and >30% of monitored features drifting. |
+| `NDCG_THRESHOLD` | `0.55` | trainer | Minimum NDCG@10 to register model |
+| `DRIFT_THRESHOLD` | `0.05` | drift-monitor | KS-test p-value threshold |
 | `CHECK_INTERVAL_SECONDS` | `300` | drift-monitor | Drift check frequency (seconds) |
 | `LOG_PREDICTIONS` | `true` | serving | Enable inference feature logging |
 | `MODEL_FALLBACK_PATH` | `/models/xgboost_ranker.json` | serving | Fallback if MLflow unavailable |

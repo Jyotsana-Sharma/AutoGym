@@ -73,9 +73,13 @@ class ModelLoader:
         return self._load_from_local(), "local", "local_fallback"
 
     def _load_from_registry(self, model_uri: str) -> xgb.Booster:
-        """Load model via mlflow.xgboost — handles .xgb/.ubj/.json formats."""
-        import mlflow.xgboost
-        return mlflow.xgboost.load_model(model_uri)
+        """Download model from MLflow and load as XGBoost Booster."""
+        # Download to temp dir and load
+        local_dir = mlflow.artifacts.download_artifacts(model_uri)
+        model_file = self._find_model_file(Path(local_dir))
+        booster = xgb.Booster()
+        booster.load_model(str(model_file))
+        return booster
 
     def _load_from_local(self) -> xgb.Booster:
         """Load model from local filesystem path."""

@@ -54,9 +54,8 @@ CHECK_INTERVAL_SECONDS = int(os.environ.get("CHECK_INTERVAL_SECONDS", "300"))
 LOOKBACK_HOURS = int(os.environ.get("LOOKBACK_HOURS", "24"))
 MIN_SAMPLES_FOR_DRIFT = int(os.environ.get("MIN_SAMPLES_FOR_DRIFT", "100"))
 TRAINING_BASELINE_PATH = os.environ.get("TRAINING_BASELINE_PATH", "/training-data/train.csv")
-# Cooldown: skip retrain trigger if a successful retrain completed within this many minutes.
-# Prevents drift from pre-retrain rows repeatedly firing new retrains.
-RETRAIN_COOLDOWN_MINUTES = int(os.environ.get("RETRAIN_COOLDOWN_MINUTES", "30"))
+# Path to persist the last trigger timestamp so drift only evaluates rows newer than it.
+DRIFT_STATE_PATH = os.environ.get("DRIFT_STATE_PATH", "/training-data/drift_state.json")
 
 # Numeric features to monitor for drift
 NUMERIC_FEATURES = [
@@ -66,6 +65,24 @@ NUMERIC_FEATURES = [
     "daily_calorie_target", "protein_target_g", "carbs_target_g", "fat_target_g",
     "history_pc1", "history_pc2", "history_pc3",
 ]
+
+
+def load_drift_state() -> dict:
+    """Load persisted drift state (last_trigger_at, etc.) from disk."""
+    try:
+        with open(DRIFT_STATE_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_drift_state(state: dict) -> None:
+    """Persist drift state to disk so restarts don't lose the trigger window."""
+    try:
+        with open(DRIFT_STATE_PATH, "w") as f:
+            json.dump(state, f, default=str)
+    except Exception as exc:
+        logger.warning("Could not save drift state: %s", exc)
 
 
 def get_db_connection():
@@ -83,10 +100,18 @@ def load_training_baseline(path: str) -> pd.DataFrame | None:
         return None
 
 
-def load_recent_inference_features(conn, hours: int) -> pd.DataFrame | None:
-    """Pull recent inference feature rows from PostgreSQL."""
+def load_recent_inference_features(
+    conn, hours: int, since: datetime | None = None
+) -> pd.DataFrame | None:
+    """Pull recent inference feature rows from PostgreSQL.
+
+    ``since`` is the hard lower bound (last trigger timestamp). The effective
+    cutoff is max(NOW() - hours, since), so we never re-evaluate rows that
+    already caused a retrain.
+    """
     try:
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        lookback_cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        cutoff = max(lookback_cutoff, since) if since else lookback_cutoff
         with conn.cursor() as cur:
             cur.execute(
                 """SELECT features FROM inference_features
@@ -324,38 +349,6 @@ def cleanup_old_inference_features(conn, retention_days: int = 90) -> int:
         return 0
 
 
-def is_retrain_in_cooldown() -> bool:
-    """
-    Return True if a retrain completed recently (within RETRAIN_COOLDOWN_MINUTES).
-    Queries the retrain-api /status endpoint. Returns False on any error so
-    drift detection fails open (triggers) rather than silently suppressing.
-    """
-    retrain_status_url = RETRAIN_WEBHOOK_URL.replace("/trigger", "/status")
-    try:
-        r = requests.get(retrain_status_url, timeout=5)
-        if r.status_code != 200:
-            return False
-        data = r.json()
-        status = data.get("status")
-        triggered_at_str = data.get("triggered_at")
-        if status != "completed" or not triggered_at_str:
-            return False
-        triggered_at = datetime.fromisoformat(triggered_at_str)
-        if triggered_at.tzinfo is None:
-            triggered_at = triggered_at.replace(tzinfo=timezone.utc)
-        age_minutes = (datetime.now(timezone.utc) - triggered_at).total_seconds() / 60
-        if age_minutes < RETRAIN_COOLDOWN_MINUTES:
-            logger.info(
-                "Retrain cooldown active: last retrain completed %.1f min ago (cooldown=%d min)",
-                age_minutes, RETRAIN_COOLDOWN_MINUTES,
-            )
-            return True
-        return False
-    except Exception as exc:
-        logger.debug("Cooldown check failed (ignoring): %s", exc)
-        return False
-
-
 def trigger_retraining(reason: str) -> bool:
     """Send a retraining trigger webhook to the retrain-api service."""
     payload = {
@@ -388,6 +381,19 @@ def run_once(report_only: bool = False) -> dict[str, Any]:
         "actions_taken": [],
     }
 
+    # Load persisted state — gives us the timestamp of the last trigger so we
+    # only evaluate inference rows that arrived after that point.
+    state = load_drift_state()
+    last_trigger_at: datetime | None = None
+    if state.get("last_trigger_at"):
+        try:
+            last_trigger_at = datetime.fromisoformat(state["last_trigger_at"])
+            if last_trigger_at.tzinfo is None:
+                last_trigger_at = last_trigger_at.replace(tzinfo=timezone.utc)
+            logger.info("Drift window starts after last trigger: %s", last_trigger_at.isoformat())
+        except Exception:
+            last_trigger_at = None
+
     # Load training baseline
     baseline_df = load_training_baseline(TRAINING_BASELINE_PATH)
 
@@ -415,32 +421,33 @@ def run_once(report_only: bool = False) -> dict[str, Any]:
     )
     report["checks"]["training_set_quality"] = training_result
 
-    # 3. Live inference drift
+    # 3. Live inference drift — only rows captured after last trigger
     if baseline_df is not None and conn is not None:
-        live_df = load_recent_inference_features(conn, hours=LOOKBACK_HOURS)
+        live_df = load_recent_inference_features(
+            conn, hours=LOOKBACK_HOURS, since=last_trigger_at
+        )
         if live_df is not None and len(live_df) >= MIN_SAMPLES_FOR_DRIFT:
             drift_result = run_drift_check(baseline_df, live_df)
             report["checks"]["inference_drift"] = drift_result
             log_drift_to_db(conn, drift_result)
 
             if drift_result["overall_drift_detected"] and not report_only:
-                if is_retrain_in_cooldown():
-                    report["actions_taken"].append(
-                        {"action": "trigger_retraining", "skipped": True,
-                         "reason": f"cooldown_active ({RETRAIN_COOLDOWN_MINUTES} min)"}
-                    )
-                else:
-                    logger.warning(
-                        "DRIFT DETECTED in %d/%d features. Triggering retraining.",
-                        drift_result["n_drifted"],
-                        drift_result["n_features_checked"],
-                    )
-                    triggered = trigger_retraining(
-                        reason=f"drift_detected: {drift_result['drifted_features'][:5]}"
-                    )
-                    report["actions_taken"].append(
-                        {"action": "trigger_retraining", "success": triggered}
-                    )
+                logger.warning(
+                    "DRIFT DETECTED in %d/%d features. Triggering retraining.",
+                    drift_result["n_drifted"],
+                    drift_result["n_features_checked"],
+                )
+                triggered = trigger_retraining(
+                    reason=f"drift_detected: {drift_result['drifted_features'][:5]}"
+                )
+                report["actions_taken"].append(
+                    {"action": "trigger_retraining", "success": triggered}
+                )
+                if triggered:
+                    # Advance the window — next check only sees rows after this point
+                    now = datetime.now(timezone.utc)
+                    save_drift_state({**state, "last_trigger_at": now.isoformat()})
+                    logger.info("Drift window advanced to %s", now.isoformat())
         else:
             n = len(live_df) if live_df is not None else 0
             report["checks"]["inference_drift"] = {

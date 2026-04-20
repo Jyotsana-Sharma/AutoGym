@@ -70,10 +70,10 @@ A unified ML project: data → features → training → evaluation → registry
 │   └── recipe_ranker_output.sample.json
 │
 ├── scripts/                       ← Operational + dev utilities
-│   ├── smoke_test.py              ← Serving smoke test (health + prediction + latency SLA)
+│   ├── smoke_test.py              ← CI smoke test (health + prediction + latency SLA)
 │   └── benchmark.py               ← Load testing + latency profiling
 │
-├── sparkyfitness-integration/     ← SparkyFitness integration patches + helper script
+├── sparkyfitness-integration/     ← Patch set applied to SparkyFitness by setup container
 │   ├── apply_integration.py       ← Idempotent route/UI patcher used by docker-compose
 │   ├── SparkyFitnessServer/       ← recommendation route/service/repository/schema
 │   └── SparkyFitnessFrontend/     ← recommendation API hook + Foods page component
@@ -85,8 +85,10 @@ A unified ML project: data → features → training → evaluation → registry
 │
 ├── docker-compose.yml             ← Single unified compose (all services, one context)
 ├── Makefile                       ← Runbook: setup, train, promote, rollback, ...
-├── .env                           ← Environment variable configuration
-└── .gitignore
+├── .env.example                   ← Environment variable template
+├── .gitignore
+└── .github/workflows/
+    └── retrain.yml                ← CI/CD: quality gate → train → evaluate → promote
 ```
 
 ---
@@ -119,33 +121,33 @@ A unified ML project: data → features → training → evaluation → registry
 ## Quick Start
 
 ```bash
-# 1. Review environment values
-nano .env                     # update credentials if needed
+# 1. Clone and configure
+git clone https://github.com/Jyotsana-Sharma/AutoGym.git
+cd AutoGym/entire_codebase
+cp .env.example .env          # safe defaults — edit only if needed
 
-# 2. Build + start infrastructure
-make setup                    # postgres + mlflow
+# 2. Bootstrap the full stack (build → data → train → serve → monitor)
+docker compose --profile pipeline up -d --build
 
-# 3. Compile training data
-make data
-
-# 4. Train + register model
-make train-direct
-
-# 5. Start serving
-make run-serving
-
-# 6. Verify
-make smoke-test
-
-# 7. Start monitoring stack
-make run-monitoring
-
-# --- Or, start the complete ML + SparkyFitness stack ---
-docker compose --profile pipeline up -d
-
-# After the first successful bootstrap, restart only steady-state services:
+# After the first successful bootstrap, steady-state restart:
 docker compose --profile runtime up -d
+
+# 3. Verify
+curl http://localhost:8000/health
+
+# 4. (Optional) Start production traffic emulation manually
+docker compose --profile data up -d data-generator
 ```
+
+Access the UIs:
+
+| Service | URL | Credentials |
+|---|---|---|
+| SparkyFitness App | http://localhost:3004 | register an account |
+| ML Serving API | http://localhost:8000/docs | none |
+| MLflow | http://localhost:5000 | none |
+| Grafana | http://localhost:3000 | admin / sparky_admin |
+| Retrain API | http://localhost:8080/status | none |
 
 ---
 
@@ -174,8 +176,11 @@ docker compose --profile runtime up -d
                /explain → SHAP feature attributions
 
 6. MONITORING + LOOP
-               drift_monitor.py: KS test every 5 min → POST /trigger on drift
-               retrain_api.py: weekly APScheduler + manual /promote /rollback
+               drift_monitor.py: KS test every 5 min on inference rows
+               Scoped window: only evaluates rows captured after last trigger
+               (drift_state.json tracks last_trigger_at — prevents re-trigger loops)
+               POST /trigger → retrain-api on drift in >30% of features
+               Serving hot-reloads new Production model within 30s of registration
 
 7. SPARKYFITNESS APP FLOW
                Foods page → /api/recommendations → ML /predict
@@ -191,7 +196,7 @@ docker compose --profile runtime up -d
 |------|------|
 | Training hyperparameters | `configs/training/xgb_ranker.yaml` |
 | Quality gate thresholds | `.env` (`NDCG_THRESHOLD`, `IMPROVEMENT_THRESHOLD`) |
-| Drift detection settings | `.env` (`DRIFT_THRESHOLD`, `CHECK_INTERVAL_SECONDS`) |
+| Drift detection settings | `.env` (`DRIFT_THRESHOLD=0.01`, `MIN_KS_STATISTIC=0.1`, `CHECK_INTERVAL_SECONDS=300`) |
 | Alert rules | `monitoring/alert_rules.yml` |
 | Serving behaviour | `configs/serving/serving.yaml` |
 | DB schema | `configs/data/init_db.sql` + `init_feedback.sql` |
@@ -219,7 +224,7 @@ curl -X POST http://localhost:8080/rollback \
   -H "Content-Type: application/json" -d '{"version":"3"}'
 ```
 
-Manual rollback is available through `make rollback` or `POST /rollback`.
+Automated rollback is implemented in CI after a failed post-promotion smoke test.
 Prometheus and Grafana provide runtime monitoring and alerting. Grafana can also
 call `POST /alerts/rollback` on the retrain API for configured critical alerts
 when `ROLLBACK_WEBHOOK_TOKEN` is set.
@@ -233,5 +238,5 @@ See [safeguarding/SAFEGUARDING_PLAN.md](safeguarding/SAFEGUARDING_PLAN.md):
 - **Explainability** — SHAP attributions per prediction
 - **Transparency** — model version + source in every response, full MLflow lineage
 - **Privacy** — pseudonymized ML IDs, no PII in artifacts, 90-day inference feature retention
-- **Accountability** — retraining metrics/logs, explicit promotion/rollback trail
-- **Robustness** — drift monitoring, alert-triggered rollback, local model fallback
+- **Accountability** — retraining metrics/logs, GitHub environment approval gates, rollback trail
+- **Robustness** — drift monitoring, CI rollback after failed promotion, local model fallback

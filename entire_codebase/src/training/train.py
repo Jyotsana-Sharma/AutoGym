@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +42,8 @@ def run_baseline_popularity(config: dict[str, Any], prepared: PreparedFrames) ->
 
 def run_training(config_path: Path):
     config = read_config(config_path)
-    run_name = config["run_name"]
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    run_name = f"{config['run_name']}_{ts}"
     start_time = time.perf_counter()
     candidate = config["candidate_name"]
 
