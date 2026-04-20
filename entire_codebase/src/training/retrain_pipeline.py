@@ -268,7 +268,8 @@ def run_retraining(
             # Use the same exclusion set as ranking_data.py to guarantee
             # feature names match what the model was trained on
             _exclude = NON_FEATURE_COLUMNS | {"submitted", "score"}
-            feature_cols = [c for c in test_df.columns if c not in _exclude]
+            feature_cols = [c for c in test_df.columns
+                            if c not in _exclude and test_df[c].dtype != object]
             dmatrix = xgb.DMatrix(test_df[feature_cols].fillna(0).values.astype("float32"),
                                    feature_names=feature_cols)
             test_df["score"] = booster.predict(dmatrix)
