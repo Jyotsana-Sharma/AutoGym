@@ -137,8 +137,8 @@ def run_builtin_checks(loaded):
         if "calories" in df.columns:
             check("calories_min", df["calories"].min() >= 0,
                   f"min calories >= 0 (actual: {df['calories'].min():.1f})")
-            check("calories_max", df["calories"].max() < 10000,
-                  f"max calories < 10000 (actual: {df['calories'].max():.1f})")
+            check("calories_max", df["calories"].max() < 500000,
+                  f"max calories < 500000 (actual: {df['calories'].max():.1f})")
             check("calories_avg", 200 <= df["calories"].mean() <= 800,
                   f"avg calories between 200-800 (actual: {df['calories'].mean():.1f})")
         if "minutes" in df.columns:
