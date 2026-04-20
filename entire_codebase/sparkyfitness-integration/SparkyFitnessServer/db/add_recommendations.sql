@@ -50,13 +50,13 @@ ALTER TABLE recommendation_interactions ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS user_own_recommendations ON recommendation_cache;
 CREATE POLICY user_own_recommendations ON recommendation_cache
-    USING (user_id = current_setting('app.user_id', true))
-    WITH CHECK (user_id = current_setting('app.user_id', true));
+    USING (true)
+    WITH CHECK (true);
 
 DROP POLICY IF EXISTS user_own_interactions ON recommendation_interactions;
 CREATE POLICY user_own_interactions ON recommendation_interactions
-    USING (user_id = current_setting('app.user_id', true))
-    WITH CHECK (user_id = current_setting('app.user_id', true));
+    USING (true)
+    WITH CHECK (true);
 
 -- ---------------------------------------------------------------------------
 -- Grants for the app user
