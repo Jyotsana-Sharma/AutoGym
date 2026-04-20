@@ -1,0 +1,13 @@
+run_name: baseline_popularity
+candidate_name: baseline_popularity
+experiment_name: autogym-recipe-ranking-ray
+random_seed: 42
+
+data:
+  train_path: "train.csv"
+  validation_path: "val.csv"
+  test_path: "test.csv"
+
+training:
+  group_key: user_id
+  label_column: label

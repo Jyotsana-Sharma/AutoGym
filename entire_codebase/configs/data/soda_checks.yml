@@ -1,0 +1,27 @@
+checks for enriched_recipes:
+  - row_count > 50000
+  - missing_count(recipe_id) = 0
+  - missing_count(calories) = 0
+  - missing_count(cuisine) = 0
+  - duplicate_count(recipe_id) = 0
+  - min(calories) >= 0
+  - max(calories) < 500000
+  - avg(calories) between 200 and 800
+  - min(minutes) > 0
+  - min(n_ingredients) >= 1
+  - min(n_reviews) >= 3
+
+checks for train:
+  - row_count > 100000
+  - missing_count(user_id) = 0
+  - missing_count(recipe_id) = 0
+  - missing_count(label) = 0
+  - avg(label) between 0.1 and 0.98
+
+checks for val:
+  - row_count > 5
+  - missing_count(label) = 0
+
+checks for test:
+  - row_count > 5
+  - missing_count(label) = 0

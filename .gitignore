@@ -1,0 +1,45 @@
+# Environment / credentials
+.env
+kaggle.json
+.kaggle/
+app-cred-*.sh
+*openrc*.sh
+sparky-data-pipeline/.CHI-251409-openrc.sh
+.CHI-251409-openrc.sh
+
+# Local virtual environments
+.venv/
+venv/
+.venv-sparky*
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Generated data / artifacts
+.data
+.output
+sparky-data-pipeline/data/
+sparky-data-pipeline/output/
+AutoGym-main/*.csv
+AutoGym-main/local/
+entire_codebase/data/*.csv
+entire_codebase/data/*.pkl
+entire_codebase/output/*.csv
+
+# MLflow local state
+mlruns/
+mlartifacts/
+
+# Archives / local OS and IDE files
+*.zip
+.DS_Store
+.idea/
+.vscode/
+*.swp
+.COURSE_CONCEPT_ALIGNMENT.md
+

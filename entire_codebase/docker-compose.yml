@@ -1,0 +1,447 @@
+# SparkyFitness ML System — Unified docker-compose
+# All services share a single build context (repository root).
+# Usage:
+#   docker compose --profile pipeline up -d   → bootstrap pipeline (data→train→serve+monitor+app)
+#   docker compose --profile runtime up -d    → steady-state runtime only, no one-shot jobs
+#   make run-all                           → bootstrap profile wrapper
+
+name: sparky-ml
+
+networks:
+  sparky-net:
+    driver: bridge
+  sparkyfitness-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  mlflow-db:
+  mlflow-artifacts:
+  prometheus-data:
+  grafana-data:
+  models-cache:
+  training-data:
+  ray-results:
+  sparkyfitness-db-data:
+  sparkyfitness-uploads:
+  sparkyfitness-backup:
+
+x-common-env: &common-env
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: 5432
+  POSTGRES_DB: sparky
+  POSTGRES_USER: sparky
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sparky_pass}
+  MLFLOW_TRACKING_URI: http://mlflow:5000
+  OS_AUTH_URL: ${OS_AUTH_URL:-}
+  OS_APPLICATION_CREDENTIAL_ID: ${OS_APPLICATION_CREDENTIAL_ID:-}
+  OS_APPLICATION_CREDENTIAL_SECRET: ${OS_APPLICATION_CREDENTIAL_SECRET:-}
+  OS_REGION_NAME: ${OS_REGION_NAME:-CHI@TACC}
+
+services:
+  # =========================================================================
+  # INFRASTRUCTURE
+  # =========================================================================
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: sparky-postgres
+    restart: unless-stopped
+    networks: [sparky-net]
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./configs/data/init_db.sql:/docker-entrypoint-initdb.d/01_init.sql
+      - ./configs/data/init_feedback.sql:/docker-entrypoint-initdb.d/02_feedback.sql
+    environment:
+      POSTGRES_DB: sparky
+      POSTGRES_USER: sparky
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sparky_pass}
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sparky -d sparky"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mlflow:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: mlflow
+    container_name: sparky-mlflow
+    restart: unless-stopped
+    networks: [sparky-net]
+    volumes:
+      - mlflow-db:/app/local/mlflow
+      - mlflow-artifacts:/app/local/mlartifacts
+    ports:
+      - "5000:5000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # =========================================================================
+  # DATA PIPELINE
+  # =========================================================================
+
+  data-generator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: data
+    container_name: sparky-data-generator
+    networks: [sparky-net]
+    profiles: ["data", "full"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./data:/data
+      - ./output:/output
+    environment:
+      <<: *common-env
+      DATABASE_URL: postgresql://sparky:${POSTGRES_PASSWORD:-sparky_pass}@postgres:5432/sparky
+    command: python src/data/data_generator.py --rate 1.0 --days 7
+    restart: unless-stopped
+
+  batch-pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: data
+    container_name: sparky-batch-pipeline
+    networks: [sparky-net]
+    profiles: ["data", "retrain", "full", "pipeline"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./data:/data
+      - ./output:/output
+      - training-data:/training-data
+    environment:
+      <<: *common-env
+      DATABASE_URL: postgresql://sparky:${POSTGRES_PASSWORD:-sparky_pass}@postgres:5432/sparky
+      OUTPUT_PATH: /training-data
+    command: >
+      sh -c "set -eu;
+             for f in enriched_recipes.csv training_table.csv train.csv val.csv test.csv manifest.json; do
+               if [ -d /output/$$f ]; then rm -rf /output/$$f; fi;
+             done;
+             DOWNLOAD_FLAG='';
+             if [ ! -f /data/RAW_recipes.csv ] || [ ! -f /data/RAW_interactions.csv ]; then
+               if [ -n \"$$OS_APPLICATION_CREDENTIAL_ID\" ] && [ -n \"$$OS_APPLICATION_CREDENTIAL_SECRET\" ]; then
+                 echo 'Raw Food.com files missing; downloading from Chameleon Swift.';
+                 DOWNLOAD_FLAG='--download-raw';
+               else
+                 echo 'ERROR: RAW_recipes.csv / RAW_interactions.csv not found and no Swift credentials set. Aborting.';
+                 exit 1;
+               fi;
+             fi;
+             python src/data/batch_pipeline.py --raw-dir /data --output-dir /output --db-url "$$DATABASE_URL" $$DOWNLOAD_FLAG &&
+             cp /output/train.csv /training-data/train.csv &&
+             cp /output/val.csv /training-data/val.csv &&
+             cp /output/test.csv /training-data/test.csv &&
+             cp /output/manifest.json /training-data/manifest.json"
+
+  drift-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: data
+    container_name: sparky-drift-monitor
+    networks: [sparky-net]
+    profiles: ["monitoring", "full", "pipeline", "runtime"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./output:/output
+      - training-data:/training-data
+    environment:
+      <<: *common-env
+      DATABASE_URL: postgresql://sparky:${POSTGRES_PASSWORD:-sparky_pass}@postgres:5432/sparky
+      RETRAIN_WEBHOOK_URL: http://retrain-api:8080/trigger
+      DRIFT_THRESHOLD: "0.01"
+      MIN_KS_STATISTIC: "0.1"
+      CHECK_INTERVAL_SECONDS: "300"
+      TRAINING_BASELINE_PATH: /training-data/train.csv
+    command: python src/data/drift_monitor.py --loop
+
+  # =========================================================================
+  # TRAINING PIPELINE
+  # =========================================================================
+
+  trainer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: training
+    container_name: sparky-trainer
+    networks: [sparky-net]
+    profiles: ["retrain", "full", "pipeline"]
+    depends_on:
+      mlflow:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      batch-pipeline:
+        condition: service_completed_successfully
+    volumes:
+      - ./data:/data
+      - training-data:/training-data
+      - mlflow-artifacts:/app/local/mlartifacts
+      - models-cache:/models
+      - ray-results:/app/local/ray_results
+    environment:
+      <<: *common-env
+      TRAIN_CSV: /training-data/train.csv
+      VAL_CSV: /training-data/val.csv
+      TEST_CSV: /training-data/test.csv
+      NDCG_THRESHOLD: "0.55"
+      MODEL_EXPORT_PATH: /models/xgboost_ranker.json
+      ROLLBACK_WEBHOOK_TOKEN: ${ROLLBACK_WEBHOOK_TOKEN:-}
+      ROLLBACK_ALERT_NAMES: ${ROLLBACK_ALERT_NAMES:-HighErrorRate}
+      AUTO_PROMOTE: ${AUTO_PROMOTE:-true}
+    command: python -m src.training.retrain_pipeline --config configs/training/xgb_ranker.yaml --auto-promote
+
+  retrain-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: training
+    container_name: sparky-retrain-api
+    networks: [sparky-net]
+    profiles: ["monitoring", "full", "pipeline", "runtime"]
+    depends_on:
+      mlflow:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./data:/data
+      - training-data:/training-data
+      - mlflow-artifacts:/app/local/mlartifacts
+      - models-cache:/models
+      - ray-results:/app/local/ray_results
+    environment:
+      <<: *common-env
+      TRAIN_CSV: /training-data/train.csv
+      VAL_CSV: /training-data/val.csv
+      TEST_CSV: /training-data/test.csv
+      NDCG_THRESHOLD: "0.55"
+      MODEL_EXPORT_PATH: /models/xgboost_ranker.json
+      DATABASE_URL: postgresql://sparky:${POSTGRES_PASSWORD:-sparky_pass}@postgres:5432/sparky
+      ROLLBACK_WEBHOOK_TOKEN: ${ROLLBACK_WEBHOOK_TOKEN:-}
+      ROLLBACK_ALERT_NAMES: ${ROLLBACK_ALERT_NAMES:-HighErrorRate}
+      AUTO_PROMOTE: ${AUTO_PROMOTE:-true}
+    ports:
+      - "8080:8080"
+    command: python -m src.training.retrain_api
+
+  # =========================================================================
+  # SERVING
+  # =========================================================================
+
+  serving:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: serving
+    container_name: sparky-serving
+    networks: [sparky-net]
+    profiles: ["serving", "full", "pipeline", "runtime"]
+    depends_on:
+      mlflow:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      trainer:
+        condition: service_completed_successfully
+        required: false
+    volumes:
+      - models-cache:/models
+      - mlflow-artifacts:/app/local/mlartifacts
+    environment:
+      <<: *common-env
+      DATABASE_URL: postgresql://sparky:${POSTGRES_PASSWORD:-sparky_pass}@postgres:5432/sparky
+      LOG_PREDICTIONS: "true"
+      MODEL_FALLBACK_PATH: /models/xgboost_ranker.json
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # =========================================================================
+  # MONITORING STACK
+  # =========================================================================
+
+  prometheus:
+    image: prom/prometheus:v2.51.2
+    container_name: sparky-prometheus
+    networks: [sparky-net]
+    profiles: ["monitoring", "full", "pipeline", "runtime"]
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: sparky-grafana
+    networks: [sparky-net]
+    profiles: ["monitoring", "full", "pipeline", "runtime"]
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-sparky_admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      ROLLBACK_WEBHOOK_TOKEN: ${ROLLBACK_WEBHOOK_TOKEN:-}
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    depends_on: [prometheus]
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: sparky-postgres-exporter
+    networks: [sparky-net]
+    profiles: ["monitoring", "full", "pipeline", "runtime"]
+    environment:
+      DATA_SOURCE_NAME: "postgresql://sparky:${POSTGRES_PASSWORD:-sparky_pass}@postgres:5432/sparky?sslmode=disable"
+    ports:
+      - "9187:9187"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # =========================================================================
+  # SPARKYFITNESS APPLICATION
+  # The app images bake in the ML integration during build.
+  # sparkyfitness-setup is manual-only so the upstream checkout stays clean.
+  # =========================================================================
+
+  sparkyfitness-setup:
+    image: python:3.11-slim
+    container_name: sparkyfitness-setup
+    profiles: ["manual-setup"]
+    volumes:
+      - ./sparkyfitness-integration:/integration:ro
+      - ./SparkyFitness:/app:rw
+      - ./.env.sparky.example:/env.example:ro
+    command: python3 /integration/apply_integration.py
+
+  sparkyfitness-db:
+    image: postgres:15-alpine
+    container_name: sparkyfitness-db
+    restart: always
+    networks: [sparkyfitness-network]
+    profiles: ["sparkyfitness", "pipeline", "runtime"]
+    environment:
+      POSTGRES_DB: ${SPARKY_FITNESS_DB_NAME:-sparkyfitness_db}
+      POSTGRES_USER: ${SPARKY_FITNESS_DB_USER:-sparky}
+      POSTGRES_PASSWORD: ${SPARKY_FITNESS_DB_PASSWORD:-sparky_fit_pass}
+    volumes:
+      - sparkyfitness-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${SPARKY_FITNESS_DB_USER:-sparky} -d ${SPARKY_FITNESS_DB_NAME:-sparkyfitness_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  sparkyfitness-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: sparkyfitness-backend
+    container_name: sparkyfitness-server
+    restart: always
+    networks: [sparkyfitness-network, sparky-net]
+    profiles: ["sparkyfitness", "pipeline", "runtime"]
+    environment:
+      SPARKY_FITNESS_DB_USER: ${SPARKY_FITNESS_DB_USER:-sparky}
+      SPARKY_FITNESS_DB_HOST: sparkyfitness-db
+      SPARKY_FITNESS_DB_NAME: ${SPARKY_FITNESS_DB_NAME:-sparkyfitness_db}
+      SPARKY_FITNESS_DB_PASSWORD: ${SPARKY_FITNESS_DB_PASSWORD:-sparky_fit_pass}
+      SPARKY_FITNESS_APP_DB_USER: ${SPARKY_FITNESS_APP_DB_USER:-sparkyapp}
+      SPARKY_FITNESS_APP_DB_PASSWORD: ${SPARKY_FITNESS_APP_DB_PASSWORD:-sparky_app_pass}
+      SPARKY_FITNESS_DB_PORT: ${SPARKY_FITNESS_DB_PORT:-5432}
+      SPARKY_FITNESS_API_ENCRYPTION_KEY: ${SPARKY_FITNESS_API_ENCRYPTION_KEY:-changeme_32char_key_for_prod_use!}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-changeme_better_auth_secret_for_production}
+      SPARKY_FITNESS_FRONTEND_URL: ${SPARKY_FITNESS_FRONTEND_URL:-http://localhost:3004}
+      SPARKY_FITNESS_DISABLE_SIGNUP: ${SPARKY_FITNESS_DISABLE_SIGNUP:-false}
+      SPARKY_FITNESS_ADMIN_EMAIL: ${SPARKY_FITNESS_ADMIN_EMAIL:-}
+      SPARKY_FITNESS_LOG_LEVEL: ${SPARKY_FITNESS_LOG_LEVEL:-info}
+      ALLOW_PRIVATE_NETWORK_CORS: ${ALLOW_PRIVATE_NETWORK_CORS:-false}
+      SPARKY_FITNESS_EXTRA_TRUSTED_ORIGINS: ${SPARKY_FITNESS_EXTRA_TRUSTED_ORIGINS:-}
+      GARMIN_MICROSERVICE_URL: http://sparkyfitness-garmin:8000
+      ML_RECOMMENDATION_URL: http://sparky-serving:8000
+      ML_MODEL_NAME: sparky-ranker
+    volumes:
+      - sparkyfitness-uploads:/app/SparkyFitnessServer/uploads
+      - sparkyfitness-backup:/app/SparkyFitnessServer/backup
+    ports:
+      - "3010:3010"
+    depends_on:
+      sparkyfitness-db:
+        condition: service_healthy
+
+  sparkyfitness-migrate:
+    image: postgres:15-alpine
+    container_name: sparkyfitness-migrate
+    networks: [sparkyfitness-network]
+    profiles: ["sparkyfitness", "pipeline", "runtime"]
+    depends_on:
+      sparkyfitness-db:
+        condition: service_healthy
+      sparkyfitness-server:
+        condition: service_started
+    environment:
+      PGPASSWORD: ${SPARKY_FITNESS_DB_PASSWORD:-sparky_fit_pass}
+    volumes:
+      - ./sparkyfitness-integration/SparkyFitnessServer/db/add_recommendations.sql:/migration.sql:ro
+    entrypoint: []
+    command:
+      - /bin/sh
+      - -c
+      - "sleep 10 && psql -h sparkyfitness-db -U ${SPARKY_FITNESS_DB_USER:-sparky} -d ${SPARKY_FITNESS_DB_NAME:-sparkyfitness_db} -f /migration.sql && echo 'Recommendation migration applied.'"
+
+  sparkyfitness-frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: sparkyfitness-frontend
+    container_name: sparkyfitness-frontend
+    restart: always
+    networks: [sparkyfitness-network]
+    profiles: ["sparkyfitness", "pipeline", "runtime"]
+    environment:
+      SPARKY_FITNESS_FRONTEND_URL: ${SPARKY_FITNESS_FRONTEND_URL:-http://localhost:3004}
+      SPARKY_FITNESS_SERVER_HOST: sparkyfitness-server
+      SPARKY_FITNESS_SERVER_PORT: 3010
+      VITE_BACKEND_HOST: sparkyfitness-server
+    ports:
+      - "3004:8080"
+    depends_on:
+      sparkyfitness-server:
+        condition: service_started

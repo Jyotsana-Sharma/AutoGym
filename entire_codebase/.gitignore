@@ -1,0 +1,37 @@
+# Environment / credentials — NEVER commit
+# .env
+kaggle.json
+.kaggle/
+app-cred-*.sh
+*openrc*.sh
+# Allow scripts/*.sh but block credential shell scripts (covered above)
+!scripts/*.sh
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Generated data / artifacts — managed by pipeline, not git
+output/
+sparky-data-pipeline/output/
+AutoGym-main/*.csv
+
+# MLflow local state
+AutoGym-main/local/
+mlruns/
+mlartifacts/
+
+# Docker volumes
+*.zip
+
+# IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp

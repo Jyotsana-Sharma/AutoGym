@@ -1,0 +1,42 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    project: sparky-fitness
+    environment: production
+
+rule_files:
+  - /etc/prometheus/alert_rules.yml
+
+scrape_configs:
+  # Serving API — prediction metrics, latency, model version
+  - job_name: sparky-serving
+    static_configs:
+      - targets: ["serving:8000"]
+    metrics_path: /metrics
+    scrape_interval: 15s
+
+  # Retraining API — job status
+  - job_name: sparky-retrain-api
+    static_configs:
+      - targets: ["retrain-api:8080"]
+    metrics_path: /metrics
+    scrape_interval: 30s
+
+  # PostgreSQL exporter — DB health and query perf
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+    scrape_interval: 30s
+
+  # MLflow tracking server
+  - job_name: mlflow
+    static_configs:
+      - targets: ["mlflow:5000"]
+    metrics_path: /metrics
+    scrape_interval: 60s
+
+  # Prometheus self-monitoring
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
