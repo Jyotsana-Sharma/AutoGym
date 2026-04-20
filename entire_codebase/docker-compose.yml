@@ -99,12 +99,16 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      serving:
+        condition: service_healthy
     volumes:
       - ./data:/data
       - ./output:/output
     environment:
       <<: *common-env
       DATABASE_URL: postgresql://sparky:${POSTGRES_PASSWORD:-sparky_pass}@postgres:5432/sparky
+      ML_RECOMMENDATION_URL: http://sparky-serving:8000
+      PRODUCTION_TRAFFIC_CSV: /output/test.csv
     command: python src/data/data_generator.py --rate 1.0 --days 7
     restart: unless-stopped
 
