@@ -169,8 +169,8 @@ services:
       DRIFT_THRESHOLD: "0.01"
       MIN_KS_STATISTIC: "0.1"
       CHECK_INTERVAL_SECONDS: "300"
-      RETRAIN_COOLDOWN_MINUTES: "30"
       TRAINING_BASELINE_PATH: /training-data/train.csv
+      DRIFT_STATE_PATH: /training-data/drift_state.json
     command: python src/data/drift_monitor.py --loop
 
   # =========================================================================
