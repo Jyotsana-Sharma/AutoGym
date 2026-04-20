@@ -62,7 +62,7 @@ MLFLOW_MODEL_NAME = os.environ.get("MLFLOW_MODEL_NAME", "sparky-ranker")
 MODEL_FALLBACK_PATH = os.environ.get("MODEL_FALLBACK_PATH", "/models/xgboost_ranker.json")
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 LOG_PREDICTIONS = os.environ.get("LOG_PREDICTIONS", "true").lower() == "true"
-MODEL_POLL_INTERVAL = int(os.environ.get("MODEL_POLL_INTERVAL_SEC", "60"))
+MODEL_POLL_INTERVAL = int(os.environ.get("MODEL_POLL_INTERVAL_SEC", "30"))
 
 mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 
@@ -159,9 +159,10 @@ def _poll_for_new_model():
                     model_reload_counter.inc()
             else:
                 latest_version = loader.get_latest_production_version()
-                if latest_version and latest_version != _model_version:
+                # _model_version stores "v2", get_latest_production_version returns "2"
+                if latest_version and f"v{latest_version}" != _model_version:
                     logger.info(
-                        "New Production model detected: %s → %s. Reloading...",
+                        "New Production model detected: %s → v%s. Reloading...",
                         _model_version,
                         latest_version,
                     )
