@@ -468,8 +468,8 @@ docker system prune -a --volumes
 | `ROLLBACK_WEBHOOK_TOKEN` | _(empty)_ | grafana, retrain-api | Bearer token required before Grafana alert rollback is enabled |
 | `ROLLBACK_ALERT_NAMES` | `HighErrorRate` | retrain-api | Comma-separated critical alert names allowed to trigger rollback |
 | `MLFLOW_TRACKING_URI` | `http://mlflow:5000` | trainer, serving | MLflow server address |
-| `NDCG_THRESHOLD` | `0.55` | trainer | Minimum NDCG@10 to register model |
-| `DRIFT_THRESHOLD` | `0.05` | drift-monitor | KS-test p-value threshold |
+| `NDCG_THRESHOLD` | `0.55` in Compose env | trainer | Minimum NDCG@10 to register model. The code fallback is `0.79` if this env var is not set. |
+| `DRIFT_THRESHOLD` | `0.01` in Compose env | drift-monitor | KS-test p-value threshold. Drift also requires `MIN_KS_STATISTIC >= 0.1` and >30% of monitored features drifting. |
 | `CHECK_INTERVAL_SECONDS` | `300` | drift-monitor | Drift check frequency (seconds) |
 | `LOG_PREDICTIONS` | `true` | serving | Enable inference feature logging |
 | `MODEL_FALLBACK_PATH` | `/models/xgboost_ranker.json` | serving | Fallback if MLflow unavailable |

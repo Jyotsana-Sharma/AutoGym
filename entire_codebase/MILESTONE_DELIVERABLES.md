@@ -58,35 +58,30 @@ Each service in `docker-compose.yml` selects its stage via `target: data/trainin
 
 ### 2. End-to-End Automation Pipeline
 
-The system is fully automated from data → training → serving with no manual SSH required for retraining, evaluation, or promotion.
+The system is automated from data → training → serving through the deployed Compose services, `retrain-api`, MLflow Registry, and Make targets. The repository does **not** currently include a checked-in `.github/workflows/retrain.yml`; for this 3-person team submission, retraining and promotion automation are implemented inside the running Chameleon system instead of GitHub Actions.
 
-**GitHub Actions CI/CD** (`.github/workflows/retrain.yml`) — 4-stage pipeline:
+**Runtime retraining pipeline** (`src/training/retrain_api.py` + `src/training/retrain_pipeline.py`) — 5-step pipeline:
 
 ```
-Stage 1: data-quality        → Soda checks (23 checks) on train/val/test CSVs
-                               + drift report (no trigger in CI)
-Stage 2: train-and-register  → 5-step pipeline:
-                                 Step 1: Soda data quality gate
-                                 Step 2: Patch config with data paths
-                                 Step 3: XGBoost LambdaRank training
-                                 Step 3.5: Fairness gate + SHAP explainability
-                                 Step 4: Quality gates + MLflow registration
-                                 Step 5: Optional auto-promote
-Stage 3: auto-promote        → Promote Staging→Production + hot-reload serving
-Stage 4: rollback-on-failure → Auto-rollback if smoke test fails
+Step 0: Refresh data         → Batch pipeline merges production interactions
+Step 1: data-quality         → Soda checks on train/val/test CSVs
+Step 2: train-and-register   → XGBoost LambdaRank training
+Step 3: safeguarding         → Fairness gate + SHAP global explainability
+Step 4: quality gates        → NDCG/regression/fairness gates + MLflow registration
+Step 5: promotion/export     → Optional auto-promote + local fallback model export
 ```
 
 **Triggers:**
-- `push` to `main` when training config or source code changes
-- Cron: every Sunday 02:00 UTC (weekly forced retraining)
-- Manual `workflow_dispatch` with `auto_promote` flag
+- In-process APScheduler cron: every Sunday 02:00 UTC by default (`RETRAIN_CRON`)
+- Manual `POST /trigger` or `make train`
+- Manual `make train-direct` for a blocking one-shot retraining run
 - HTTP webhook from drift monitor → `retrain-api:8080/trigger` (drift-triggered)
 
 **Runtime automation chain:**
 1. Drift monitor runs KS-test every 300 seconds across 19 features
-2. >30% features with p < 0.05 → POST to `retrain-api:8080/trigger`
-3. `retrain_pipeline.py` runs all 5 steps including fairness gate
-4. Serving hot-reloads new Production model every 60 seconds (zero downtime)
+2. >30% features with p < `DRIFT_THRESHOLD` and KS statistic ≥ `MIN_KS_STATISTIC` → POST to `retrain-api:8080/trigger`
+3. `retrain_pipeline.py` runs data refresh, quality checks, training, fairness/explainability, registry gates, and optional promotion
+4. Serving hot-reloads new Production model every 30 seconds by default (zero downtime)
 5. Previous Production version archived — instant rollback available
 
 ---
@@ -168,11 +163,11 @@ After every training run, the scored test set is automatically loaded and `run_f
 - **90-day retention enforced:** `cleanup_old_inference_features()` runs every 300 seconds, deletes `inference_features` rows older than 90 days, and logs the count deleted
 - Inference features are now captured on every `/predict` call: `prediction_logger.log_features()` called alongside `log_batch()`, populating the `inference_features` table the drift monitor reads from
 
-#### Accountability (wired into CI/CD + MLflow Registry)
+#### Accountability (wired into retrain API + MLflow Registry)
 
 - Every model in the Registry has `quality_gate_status`, `fairness_passed`, `registered_at`, `ndcg_at_10` tags
 - Promotion Staging → Production logged in MLflow model description with timestamp and previous version number
-- CI `production` environment requires approval before promotion
+- Promotion can be controlled through `POST /promote` / `make promote`; `AUTO_PROMOTE` is configurable for scheduled or webhook-triggered runs
 - `rollback_production()` archives current version and logs the replacement in the model description — no version is ever deleted
 
 #### Robustness (wired into serving + alerting)
@@ -236,7 +231,7 @@ Soda Core checks block the pipeline if any check fails. Integrated as Step 1 of 
 3. User feature derivation: cooking history → 6-dim PCA (`HISTORY_PCA_COMPONENTS=6`); user goal features from SparkyFitness profile
 4. Time-stratified splits: train/val/test split by date, not random — prevents temporal leakage
 
-**Manifest** (`output/manifest.json`): records split sizes, date ranges, feature count, SHA-256 of source files. Committed to repo; push triggers CI retraining.
+**Manifest** (`output/manifest.json`): records split sizes, date ranges, SHA-256 hashes of train/val/test files, pipeline version, creation time, git commit when available, and label balance. It supports reproducibility and can be uploaded to Swift with the versioned training artifacts.
 
 **Training set quality checks** (runtime, in `check_training_set_quality`):
 - Label positive rate must be 5%–95%
@@ -244,7 +239,7 @@ Soda Core checks block the pipeline if any check fails. Integrated as Step 1 of 
 - Negative calorie values detected
 - File existence validated for all three splits
 
-**Feature vector:** 47 features — recipe attributes, macros, allergen flags, user goal targets, dietary restriction flags, 6 history PCA components (full list in `app_production.py:FEATURE_COLUMNS`)
+**Feature vector:** 45 model features — recipe attributes, macros, allergen flags, user goal targets, dietary restriction flags, and 6 history PCA components. The canonical train/serve contract is `src/serving/feature_contract.py:FEATURE_COLUMNS`, and `tests/test_feature_contract.py` verifies that training inference uses the same feature list.
 
 ---
 
@@ -256,7 +251,7 @@ Soda Core checks block the pipeline if any check fails. Integrated as Step 1 of 
 - Reference: 5,000-row sample from `train.csv` (loaded on startup)
 - Live data: last 24 hours from `inference_features` PostgreSQL table — **now populated on every `/predict` call** via `prediction_logger.log_features()`
 - Test: Kolmogorov-Smirnov two-sample test (`scipy.stats.ks_2samp`) on each of 19 numeric features
-- Decision: drift if >30% features have p-value < 0.05 (env: `DRIFT_THRESHOLD=0.05`)
+- Decision: drift if >30% features have p-value < `DRIFT_THRESHOLD` and KS statistic ≥ `MIN_KS_STATISTIC`. In the Compose runtime, `DRIFT_THRESHOLD=0.01` and `MIN_KS_STATISTIC=0.1`.
 - Interval: every 300 seconds (env: `CHECK_INTERVAL_SECONDS=300`)
 - Minimum: requires ≥100 live predictions before running KS-test
 
@@ -303,13 +298,13 @@ Three quality gates — all must pass for registration:
 
 | Gate | Condition | Default Threshold |
 |------|-----------|-------------------|
-| 1. NDCG absolute | `ndcg_at_10 >= NDCG_THRESHOLD` | 0.55 (env: `NDCG_THRESHOLD`) |
+| 1. NDCG absolute | `ndcg_at_10 >= NDCG_THRESHOLD` | 0.55 in Compose env; code fallback is 0.79 if env is unset |
 | 2. Improvement over production | `ndcg >= prod_ndcg - IMPROVEMENT_THRESHOLD` | must not regress >0.01 |
 | 3. Fairness | `fairness_passed=True` from `run_fairness_check()` | per-group NDCG ≥ 80% of overall + allergen safety <1% |
 
 **Gate failure:** failed gates logged to MLflow as `quality_gate_results.json`; run tagged `quality_gate_status=FAILED`; model **not registered** — serving continues with existing Production version.
 
-**Gate pass:** model registered to Registry as Staging; run tagged `quality_gate_status=PASSED` + `registry_version=N`; Staging → Production requires separate promotion step (CI Stage 3 or manual).
+**Gate pass:** model registered to Registry as Staging; run tagged `quality_gate_status=PASSED` + `registry_version=N`; Staging → Production happens through `POST /promote`, `make promote`, or configured `AUTO_PROMOTE`.
 
 **Previous Production archived** (not deleted) on every promotion → instant rollback available.
 
@@ -456,6 +451,6 @@ These reach `POST /api/recommendations/feedback` → `recommendationRepository.l
 | Rollback | `model_registry.py:rollback_production` | Previous Production archived, instant restore | ✓ Wired |
 | Safeguarding plan | `safeguarding/SAFEGUARDING_PLAN.md` | Covers all 6 principles with concrete mechanisms | ✓ Done |
 | SparkyFitness integration | `sparkyfitness-integration/` | Full stack: React → Express → FastAPI → XGBoost | ✓ Done |
-| End-to-end automation | `.github/workflows/retrain.yml` | 4-stage CI + weekly cron + drift-triggered retraining | ✓ Done |
+| End-to-end automation | `src/training/retrain_api.py`, `src/training/retrain_pipeline.py`, `Makefile` | Weekly scheduler + manual trigger + drift-triggered retraining + promotion/rollback endpoints | ✓ Done |
 | Single Dockerfile | `Dockerfile` | 4-stage multi-stage build, replaces 4 separate files | ✓ Done |
 | Chameleon deployment | `CHAMELEON_DEPLOYMENT.md` | Step-by-step guide with all safeguarding verification steps | ✓ Done |

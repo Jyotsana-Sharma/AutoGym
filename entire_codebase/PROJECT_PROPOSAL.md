@@ -20,7 +20,7 @@
    - 4.8 [Production Serving](#48-production-serving)
    - 4.9 [Inference Feature Logging](#49-inference-feature-logging)
    - 4.10 [Drift Monitoring and Retraining Loop](#410-drift-monitoring-and-retraining-loop)
-   - 4.11 [CI/CD Pipeline (GitHub Actions)](#411-cicd-pipeline-github-actions)
+   - 4.11 [Runtime Automation Pipeline](#411-runtime-automation-pipeline)
 5. [Safeguarding Plan](#5-safeguarding-plan)
    - 5.1 [Fairness](#51-fairness)
    - 5.2 [Explainability](#52-explainability)
@@ -53,7 +53,7 @@ The system is deployed on **Chameleon Cloud (KVM@TACC)** with a single `docker-c
 | Model quality | NDCG@10 = **0.8148** on held-out test set |
 | Feature vector | **45 dimensions** (recipe + nutritional + allergen + user history) |
 | Inference latency | P50 < 50 ms, P99 < 100 ms |
-| Training automation | 4-stage CI/CD with automatic model promotion |
+| Training automation | Runtime `retrain-api` scheduler/webhook pipeline with configurable model promotion |
 | Retraining trigger | Automated via KS-test drift monitor or scheduled weekly |
 | Safeguarding | Fairness gate + SHAP explainability + 90-day privacy retention — all wired into pipeline |
 | Containers | 14 bootstrap services / 11 runtime services, single multi-stage Dockerfile |
@@ -128,7 +128,7 @@ Generic recipe recommendation systems fail in two fundamental ways:
 │                                                                                 │
 │  retrain_api (port 8080)                                                        │
 │    → POST /trigger → launches new training run                                  │
-│    → Called by: drift_monitor.py, GitHub Actions, manual                        │
+│    → Called by: drift_monitor.py, weekly scheduler, manual API/Make targets     │
 └───────────────────────────┬─────────────────────────────────────────────────────┘
                             │
                       Model in MLflow Registry
@@ -217,7 +217,7 @@ Soda Core checks enforce data integrity as a hard gate:
 - Zero nulls in `user_id`, `recipe_id`, `label`
 - Label balance: `avg(label) between 0.1 and 0.98` — prevents severely imbalanced training
 
-If any check fails, the pipeline exits non-zero and GitHub Actions marks the step as failed — no model is trained on bad data.
+If any check fails, the pipeline exits non-zero and `retrain-api` records the run as failed — no model is trained on bad data.
 
 Additionally, `drift_monitor.py` runs `check_training_set_quality()` at compile time to verify:
 - No all-zero (zero-variance) feature columns (pipeline bug detection)
@@ -375,7 +375,7 @@ fairness_passed = fairness_result["overall_passed"]
 - Allergen safety: top-5 recommendations for restricted users must violate allergen restrictions at <1%
 - Result logged to MLflow as `fairness_results.json` artifact
 
-If `fairness_passed = False`, the model is **not registered** to the MLflow Registry. The training job exits with a non-zero code, GitHub Actions marks the step failed, and no promotion occurs.
+If `fairness_passed = False`, the model is **not registered** to the MLflow Registry. The retraining result is marked failed or unregistered, and no promotion occurs.
 
 #### SHAP Explainability
 
@@ -523,7 +523,8 @@ For each of 19 monitored features, a **Kolmogorov-Smirnov two-sample test** is r
 
 ```python
 ks_stat, p_value = stats.ks_2samp(baseline_clean, live_clean)
-drift_detected = p_value < DRIFT_THRESHOLD  # default: 0.05
+drift_detected = p_value < DRIFT_THRESHOLD and ks_stat >= MIN_KS_STATISTIC
+# Compose runtime: DRIFT_THRESHOLD=0.01, MIN_KS_STATISTIC=0.1
 ```
 
 **Features monitored** (19 total):
@@ -557,36 +558,40 @@ This enforces a 90-day maximum retention on user inference data. See [Section 5.
 
 ---
 
-### 4.11 CI/CD Pipeline (GitHub Actions)
+### 4.11 Runtime Automation Pipeline
 
-**File**: `.github/workflows/retrain.yml`
-**Triggers**: Push to main, weekly cron (Sundays), drift webhook
+**Implementation**: `src/training/retrain_api.py`, `src/training/retrain_pipeline.py`, `src/data/drift_monitor.py`, and `Makefile`
 
-Four-stage pipeline with automatic rollback:
+The final repository does not include a checked-in `.github/workflows/retrain.yml`. For the 3-person team deployment, automation runs inside the Chameleon Compose stack through the retrain API, weekly scheduler, drift webhook, MLflow Registry, and operational Make targets.
+
+Five-stage runtime pipeline:
 
 ```
-Stage 1: Data Quality Check
-  → python src/data/drift_monitor.py --report-only
-  → Exit non-zero if training data quality checks fail
-  → Blocks training if data is bad
+Step 0: Refresh Training Data
+  → python -m src.data.batch_pipeline --db-url $DATABASE_URL
+  → Merges production interactions with Food.com source data
 
-Stage 2: Train + Fairness Gate + Register
+Step 1: Data Quality Check
+  → python src/data/run_soda_checks.py
+  → Blocks training if train/val/test checks fail
+
+Step 2: Train + Fairness Gate + Register
   → python -m src.training.retrain_pipeline --config configs/training/xgb_ranker.yaml
   → Includes Step 3.5 (fairness + SHAP) internally
   → Registers to MLflow Registry if all gates pass
 
-Stage 3: Auto-Promote
-  → python src/training/promote_model.py
-  → Transitions Staging → Production if NDCG improved
-  → Serving layer hot-reloads within 60 seconds
+Step 3: Promote
+  → POST /promote or make promote
+  → Transitions Staging → Production when approved/configured
+  → Serving layer hot-reloads within 30 seconds by default
 
-Stage 4: Rollback (on failure)
-  → python src/training/rollback_model.py
+Step 4: Rollback
+  → POST /rollback or make rollback
   → Transitions previous Archived version back to Production
-  → Triggered automatically if Stage 2 or Stage 3 fails
+  → Grafana can call /alerts/rollback for configured critical alerts
 ```
 
-The entire workflow runs without SSH access to the VM — promotions and rollbacks are managed through MLflow's model registry API, and the serving layer polls for changes automatically.
+The runtime workflow avoids manual SSH for normal retraining, promotion, and rollback operations. Operators can trigger it through HTTP endpoints or Make targets, while drift-triggered and scheduled retraining run from the deployed services.
 
 ---
 
@@ -674,7 +679,7 @@ def cleanup_old_inference_features(conn, retention_days: int = 90) -> int:
 **Implementation**:
 - **MLflow Registry**: Every model version has a state machine (None → Staging → Production → Archived). Transitions are timestamped and attributed.
 - **Gate results artifact**: Every registered model has `quality_gate_results.json` containing all three gate verdicts (NDCG threshold, production-regression check, fairness).
-- **Retraining triggers**: `drift_monitor.py` logs the reason for every retraining trigger (`drift_detected: [feature_list]`). GitHub Actions logs every workflow run with trigger reason.
+- **Retraining triggers**: `drift_monitor.py` logs the reason for every retraining trigger (`drift_detected: [feature_list]`), and `retrain-api` exposes the latest trigger reason and job status.
 - **`retrain-api` (port 8080)**: All retraining requests go through this API — creates an audit trail of who/what triggered retraining and when.
 - **`rollback_model.py`**: Rollback events are explicit MLflow stage transitions, visible in the registry history.
 - **Prometheus + Grafana**: Operator-visible dashboards for model behavior over time.
@@ -695,7 +700,7 @@ def cleanup_old_inference_features(conn, retention_days: int = 90) -> int:
 | **DB connection resilience** | All DB operations have `try/except` with `conn.rollback()` on failure |
 | **MLflow healthcheck** | Docker Compose healthcheck on `mlflow:5000/health` before training or serving containers start |
 | **Postgres healthcheck** | `pg_isready -U sparky -d sparky` healthcheck with 5 retries |
-| **CI/CD rollback** | GitHub Actions Stage 4 automatically rolls back to the previous Production model if training or promotion fails |
+| **Alert/API rollback** | `POST /rollback`, `make rollback`, and Grafana's configured critical-alert webhook restore the previous Production model |
 | **Time-stratified splits** | Temporal train/val/test split prevents future data from contaminating training — a robustness guarantee against evaluation inflation |
 
 ---
@@ -954,7 +959,7 @@ docker compose --profile runtime up -d
 | `HighLatency` | P95 latency > 500 ms for 10 min | warning |
 | `ModelStale` | No inference in 30 min (model not loaded) | warning |
 | `DriftDetected` | Drift log shows overall_drift_detected = true | warning |
-| `RetrainingFailed` | CI/CD workflow failed | critical |
+| `RetrainingJobFailed` | Retrain API reports a failed retraining job in the last hour | warning |
 
 ### Grafana Dashboards (`monitoring/grafana/dashboards/`)
 
@@ -999,7 +1004,7 @@ docker compose --profile runtime up -d
 | | Grafana alerting | 10.4.2 | Alerting backed by Prometheus metrics |
 | **Containerization** | Docker | — | Multi-stage builds |
 | | Docker Compose | v2 | Multi-service orchestration with profiles |
-| **CI/CD** | GitHub Actions | — | 4-stage automated pipeline |
+| **Runtime automation** | `retrain-api` + Make targets | — | Scheduled, drift-triggered, manual retraining, promotion, and rollback |
 | **Compute** | Chameleon Cloud (KVM@TACC) | — | VM-based training/serving |
 | **Languages** | Python | 3.11 | All components |
 | **Config Format** | YAML | — | Training hyperparameters |
@@ -1093,11 +1098,11 @@ Given any registered model, the exact dataset, code, and hyperparameters used to
 
 ### Joint Deliverables (12/15 points) — COMPLETED
 
-- [x] **End-to-end automated workflow**: Data generation → batch compilation → training → fairness gate → MLflow registration → serving hot-reload → drift monitoring → retraining webhook. Runs via GitHub Actions and docker-compose without manual SSH intervention.
+- [x] **End-to-end automated workflow**: Data generation → batch compilation → training → fairness gate → MLflow registration → serving hot-reload → drift monitoring → retraining webhook. Runs via docker-compose, `retrain-api`, scheduled jobs, and Make targets without manual SSH for normal operation.
 - [x] **Production deployment on Chameleon Cloud**: Unified Docker Compose deployment on a KVM@TACC VM. Accessible at the VM's floating IP. Described in `CHAMELEON_DEPLOYMENT.md`.
 - [x] **SparkyFitness integration**: ML recommendations wired into the SparkyFitness regular user flow via `ML_RECOMMENDATION_URL` and shared `sparky-net` Docker network. Calling `POST /predict` for every recipe recommendation in the app.
 - [x] **Safeguarding plan implemented within the system**: Fairness gate (group NDCG@10 + allergen safety, blocking), SHAP explainability (training artifact + `/explain` endpoint), 90-day privacy retention, MLflow audit trail, Prometheus/Grafana transparency, KS-test robustness. All 6 principles have concrete code mechanisms. See [Section 5](#5-safeguarding-plan).
-- [x] **Minimal human intervention**: Promotions happen via MLflow Registry API transitions detected by the serving layer's hot-reload loop. Rollbacks triggered automatically by GitHub Actions on CI failure. Manual approval available but not required.
+- [x] **Minimal human intervention**: Promotions happen via MLflow Registry API transitions detected by the serving layer's hot-reload loop. Rollbacks are available via `POST /rollback`, `make rollback`, and the configured Grafana critical-alert webhook.
 
 ### Data Team Deliverables (3/15 points) — COMPLETED
 
@@ -1112,11 +1117,11 @@ Given any registered model, the exact dataset, code, and hyperparameters used to
 
 - [x] **XGBoost LambdaRank model** (`retrain_pipeline.py`): `rank:ndcg` objective, NDCG@10 = 0.8148, 45-feature vector, early stopping
 - [x] **MLflow experiment tracking**: All params + metrics + artifacts logged per run; model registry with Staging/Production/Archived stages
-- [x] **Automated retraining pipeline**: `retrain_pipeline.py` triggered by: CI/CD push, weekly cron, drift webhook (POST to `retrain-api`)
+- [x] **Automated retraining pipeline**: `retrain_pipeline.py` triggered by weekly cron, drift webhook (`POST /trigger` to `retrain-api`), manual API calls, or `make train`
 - [x] **Fairness gate wired into training** (Step 3.5): per-group NDCG@10 and allergen safety, hard blocker on registration if fairness_passed = False
 - [x] **SHAP explainability at training time**: `explainability/global_feature_importance.json` artifact logged to every MLflow run
 - [x] **Quality gates**: 3-gate system (NDCG threshold + production-regression check + fairness) before MLflow registration
-- [x] **Auto-promote and rollback**: GitHub Actions Stage 3 (promote) + Stage 4 (rollback on failure)
+- [x] **Promotion and rollback**: `POST /promote`, `POST /rollback`, `make promote`, `make rollback`, and configurable `AUTO_PROMOTE`
 - [x] **YAML-driven hyperparameter config** (`configs/training/xgb_ranker.yaml`): Structured, version-controlled config
 
 ### Serving Team Deliverables (3/15 points) — COMPLETED
