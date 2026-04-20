@@ -163,19 +163,23 @@ def run_retraining(
         )
         if raw_missing and os.environ.get("OS_APPLICATION_CREDENTIAL_ID") and os.environ.get("OS_APPLICATION_CREDENTIAL_SECRET"):
             refresh_cmd.append("--download-raw")
-        refresh = subprocess.run(
-            refresh_cmd,
-            capture_output=True,
-            text=True,
-            env={**os.environ, "DATABASE_URL": db_url},
-        )
-        if refresh.returncode == 0:
-            logger.info("Training data refreshed from database")
-        else:
-            logger.warning(
-                "Batch pipeline refresh failed (using existing data):\n%s",
-                refresh.stdout[-2000:] + refresh.stderr[-2000:],
+        try:
+            refresh = subprocess.run(
+                refresh_cmd,
+                capture_output=True,
+                text=True,
+                timeout=600,  # 10 min max — prevents hanging forever
+                env={**os.environ, "DATABASE_URL": db_url},
             )
+            if refresh.returncode == 0:
+                logger.info("Training data refreshed from database")
+            else:
+                logger.warning(
+                    "Batch pipeline refresh failed (using existing data):\n%s",
+                    refresh.stdout[-2000:] + refresh.stderr[-2000:],
+                )
+        except subprocess.TimeoutExpired:
+            logger.warning("Batch pipeline refresh timed out after 600s — using existing data")
     else:
         logger.info("Step 0/5: DATABASE_URL not set — using existing training CSVs")
 
