@@ -171,7 +171,7 @@ or adversarial inputs.
 
 **Data drift monitoring** (`src/data/drift_monitor.py`)
 - Kolmogorov-Smirnov test on 19 numeric features every 5 minutes
-- Drift detected if > 30% of features show statistically significant shift (p < 0.05)
+- Drift detected if > 30% of features show statistically significant shift. The Compose runtime sets `DRIFT_THRESHOLD=0.01` and `MIN_KS_STATISTIC=0.1`, so drift requires both a small p-value and a minimum effect size.
 - Automatic retraining trigger sent to retrain-api on detection
 
 **Rollback controls** (runtime alerts + model registry)
@@ -187,7 +187,7 @@ rollback route to `POST /alerts/rollback`
   (`MODEL_FALLBACK_PATH`) — no 503s during MLflow downtime
 
 **Quality gates before registration**
-- NDCG@10 ≥ 0.55 (absolute threshold)
+- NDCG@10 ≥ `NDCG_THRESHOLD` (`0.55` in Compose runtime; code fallback is `0.79` if unset)
 - NDCG@10 must not regress > 1% vs. current Production
 - Fairness gate (see §1)
 - Soda data quality gate (see data pipeline)
