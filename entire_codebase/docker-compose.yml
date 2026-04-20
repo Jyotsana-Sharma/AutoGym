@@ -99,8 +99,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      serving:
-        condition: service_healthy
     volumes:
       - ./data:/data
       - ./output:/output
