@@ -33,8 +33,25 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_late
 from pydantic import BaseModel
 import uvicorn
 
+import numpy as np
+
 from .retrain_pipeline import run_retraining
 from .model_registry import promote_to_production, rollback_production, get_production_version_info
+
+
+def _sanitize(obj: Any) -> Any:
+    """Recursively convert NumPy scalars to Python native types for JSON serialization."""
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize(v) for v in obj]
+    if isinstance(obj, (np.bool_, np.integer)):
+        return obj.item()
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    return obj
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -115,7 +132,7 @@ def _run_job(req: TriggerRequest):
         )
         with _job_lock:
             _current_job["status"] = "completed" if result["success"] else "failed"
-            _current_job["result"] = result
+            _current_job["result"] = _sanitize(result)
         status = "completed" if result["success"] else "failed"
         retrain_jobs_total.labels(status=status, reason=req.reason).inc()
         retrain_job_running.set(0)
