@@ -350,10 +350,8 @@ async function getUserHistory(userId: any, days: number = 30): Promise<UserHisto
 
 // Returns top public meals ordered by nutritional completeness — used for cold start.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function getPopularPublicMeals(limit: number, excludeIds: Set<string>): Promise<MealCandidate[]> {
-  // Use a system-level client since this is a global query, not user-specific.
-  // Fall back to a known public user or anonymous connection.
-  const client = await getClient('system').catch(() => getClient(null));
+async function getPopularPublicMeals(userId: any, limit: number, excludeIds: Set<string>): Promise<MealCandidate[]> {
+  const client = await getClient(userId);
   try {
     const excluded = excludeIds.size > 0 ? [...excludeIds] : [];
     const excludeClause = excluded.length > 0
@@ -419,7 +417,7 @@ export default {
   getRecentlyLoggedMealIds,
   getCandidateMeals,
   getUserHistory,
-  getPopularPublicMeals,
+  getPopularPublicMeals,  // (userId, limit, excludeIds)
   saveRecommendations,
   getRecommendationForFeedback,
   logInteraction,

@@ -355,7 +355,7 @@ async function getRecommendations(userId: any, limit: number, excludeRecentDays:
   const isColdStart = candidates.length === 0 || history.item_count < MIN_HISTORY_ITEMS;
   if (candidates.length === 0) {
     log('info', `[RecommendationService] Cold start for user ${userId} — fetching popular public meals`);
-    candidates = await recommendationRepository.getPopularPublicMeals(CANDIDATE_POOL_SIZE, recentlyLogged);
+    candidates = await recommendationRepository.getPopularPublicMeals(userId, CANDIDATE_POOL_SIZE, recentlyLogged);
     if (candidates.length === 0) {
       return { recommendations: [], modelVersion: 'none' };
     }
