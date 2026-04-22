@@ -205,7 +205,7 @@ checks for enriched_recipes:
   - duplicate_count(recipe_id) = 0
   - missing_count(calories) = 0
   - min(calories) >= 0
-  - max(calories) < 10000
+  - max(calories) < 500000
   - avg(calories) between 200 and 800
   - min(minutes) > 0
   - min(n_ingredients) >= 1

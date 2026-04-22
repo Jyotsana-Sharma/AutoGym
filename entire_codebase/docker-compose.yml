@@ -238,7 +238,6 @@ services:
       TEST_CSV: /training-data/test.csv
       NDCG_THRESHOLD: "0.55"
       MODEL_EXPORT_PATH: /models/xgboost_ranker.json
-      DATABASE_URL: postgresql://sparky:${POSTGRES_PASSWORD:-sparky_pass}@postgres:5432/sparky
       ROLLBACK_WEBHOOK_TOKEN: ${ROLLBACK_WEBHOOK_TOKEN:-}
       ROLLBACK_ALERT_NAMES: ${ROLLBACK_ALERT_NAMES:-HighErrorRate}
       AUTO_PROMOTE: ${AUTO_PROMOTE:-true}

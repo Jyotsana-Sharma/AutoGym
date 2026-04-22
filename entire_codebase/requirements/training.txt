@@ -7,3 +7,5 @@ ray[train]==2.51.2
 scipy==1.13.1
 xgboost==2.1.4
 prometheus-client>=0.20.0
+shap==0.47.2
+matplotlib==3.9.4

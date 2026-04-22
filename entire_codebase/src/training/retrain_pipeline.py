@@ -265,17 +265,33 @@ def run_retraining(
         logger.info("Step 3.5/6: Running fairness check and explainability...")
         try:
             test_df = pd.read_csv(test_csv)
+            train_df_ref = pd.read_csv(train_csv)
 
             # Score the test set with the just-trained model from MLflow
             model_uri = f"runs:/{run_id}/model"
             booster = mlflow.xgboost.load_model(model_uri)
-            # Use the same exclusion set as ranking_data.py to guarantee
-            # feature names match what the model was trained on
-            _exclude = NON_FEATURE_COLUMNS | {"submitted", "score"}
-            feature_cols = [c for c in test_df.columns
-                            if c not in _exclude and test_df[c].dtype != object]
-            dmatrix = xgb.DMatrix(test_df[feature_cols].fillna(0).values.astype("float32"),
-                                   feature_names=feature_cols)
+            # Use exact feature names from the trained model so cuisine
+            # (label-encoded during training) is included correctly
+            feature_cols = booster.feature_names
+            test_enc = test_df.copy()
+            for col in feature_cols:
+                if col in test_enc.columns and (
+                    test_enc[col].dtype == object
+                    or pd.api.types.is_string_dtype(test_enc[col])
+                ):
+                    categories = {
+                        v: i for i, v in enumerate(
+                            sorted(train_df_ref[col].fillna("unknown").astype(str).unique())
+                        )
+                    }
+                    test_enc[col] = (
+                        test_enc[col].fillna("unknown").astype(str)
+                        .map(categories).fillna(-1).astype(float)
+                    )
+            dmatrix = xgb.DMatrix(
+                test_enc[feature_cols].fillna(0).values.astype("float32"),
+                feature_names=feature_cols,
+            )
             test_df["score"] = booster.predict(dmatrix)
 
             # Fairness gate
