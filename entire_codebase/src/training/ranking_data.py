@@ -6,6 +6,11 @@ from pathlib import Path
 import pandas as pd
 from pandas import DataFrame
 
+try:
+    from src.serving.feature_contract import REQUEST_ONLY_FIELDS
+except Exception:
+    REQUEST_ONLY_FIELDS = []
+
 
 NON_FEATURE_COLUMNS = {
     "user_id",
@@ -16,6 +21,7 @@ NON_FEATURE_COLUMNS = {
     "request_id",
     "recommendation_id",
 }
+NON_FEATURE_COLUMNS.update(REQUEST_ONLY_FIELDS)
 
 
 @dataclass

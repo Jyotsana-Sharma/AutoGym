@@ -53,6 +53,9 @@ def run_training(config_path: Path):
         mlflow.set_tag("trainer_backend", "ray_train")
         log_run_metadata(config)
         prepared = load_training_frames(config)
+        artifact_dir = Path(config["data"]["train_path"]).resolve().parent / "embedding_artifacts"
+        if artifact_dir.exists():
+            mlflow.log_artifacts(str(artifact_dir), artifact_path="embedding_artifacts")
         mlflow.log_dict(
             {
                 "feature_count": len(prepared.feature_columns),

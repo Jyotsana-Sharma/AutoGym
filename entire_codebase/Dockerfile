@@ -45,6 +45,7 @@ RUN cat requirements/data.txt requirements/training.txt requirements/serving.txt
 FROM python-deps AS data
 
 COPY src/data/ ./src/data/
+COPY src/serving/feature_contract.py ./src/serving/feature_contract.py
 COPY configs/data/ ./configs/data/
 
 CMD ["python", "--version"]
@@ -54,6 +55,7 @@ FROM python-deps AS training
 
 COPY src/training/ ./src/training/
 COPY src/data/ ./src/data/
+COPY src/serving/feature_contract.py ./src/serving/feature_contract.py
 COPY configs/training/ ./configs/training/
 COPY configs/data/ ./configs/data/
 

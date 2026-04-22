@@ -384,6 +384,16 @@ def run_retraining(
                 shutil.copy2(str(model_file), model_export_path)
                 logger.info("Exported model from run %s to %s", result["run_id"], model_export_path)
                 result["model_exported_to"] = model_export_path
+                try:
+                    artifact_dir = mlflow.artifacts.download_artifacts(
+                        f"runs:/{result['run_id']}/embedding_artifacts"
+                    )
+                    target_dir = Path(model_export_path).parent / "embedding_artifacts"
+                    shutil.copytree(artifact_dir, target_dir, dirs_exist_ok=True)
+                    result["embedding_artifacts_exported_to"] = str(target_dir)
+                    logger.info("Exported embedding artifacts to %s", target_dir)
+                except Exception as exc:
+                    logger.warning("Embedding artifact export failed (non-fatal): %s", exc)
             else:
                 logger.warning("No model file found in run artifacts at %s", local_dir)
         except Exception as exc:

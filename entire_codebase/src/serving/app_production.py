@@ -32,11 +32,12 @@ import mlflow
 import numpy as np
 import pandas as pd
 import xgboost as xgb
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from prometheus_fastapi_instrumentator import Instrumentator
 from prometheus_client import Counter, Histogram, Gauge
 
+from .embedding_preprocessor import EmbeddingPreprocessor, ensure_feature_columns
 from .prediction_logger import PredictionLogger
 from .model_loader import ModelLoader
 from .feature_contract import FEATURE_COLUMNS, ID_COLUMNS
@@ -109,6 +110,7 @@ _model: xgb.Booster | None = None
 _model_version: str = "unknown"
 _model_source: str = "none"
 _explainer: "Explainer | None" = None
+_embedding_preprocessor: EmbeddingPreprocessor | None = None
 
 loader = ModelLoader(
     model_name=MLFLOW_MODEL_NAME,
@@ -119,12 +121,14 @@ prediction_logger = PredictionLogger(database_url=DATABASE_URL) if LOG_PREDICTIO
 
 
 def _load_model_once():
-    global _model, _model_version, _model_source, _explainer
-    m, version, source = loader.load_production_model()
+    global _model, _model_version, _model_source, _explainer, _embedding_preprocessor
+    m, version, source, embedding_artifact_dir = loader.load_production_model()
+    preprocessor = EmbeddingPreprocessor.from_artifact_dir(embedding_artifact_dir)
     with _model_lock:
         _model = m
         _model_version = version
         _model_source = source
+        _embedding_preprocessor = preprocessor
         # Safeguarding: build explainer whenever model reloads
         if _EXPLAINER_AVAILABLE and m is not None:
             try:
@@ -138,7 +142,12 @@ def _load_model_once():
         model_loaded_timestamp.set(time.time())
     except Exception:
         pass
-    logger.info("Model loaded: version=%s source=%s", version, source)
+    logger.info(
+        "Model loaded: version=%s source=%s embeddings=%s",
+        version,
+        source,
+        "enabled" if preprocessor else "disabled",
+    )
 
 
 def _poll_for_new_model():
@@ -249,6 +258,15 @@ def assemble_features(instances: list[dict]) -> tuple[np.ndarray, list[int], lis
 
     return df[FEATURE_COLUMNS].values.astype(np.float32), user_ids, recipe_ids
 
+
+def preprocess_instances(instances: list[dict]) -> list[dict]:
+    with _model_lock:
+        preprocessor = _embedding_preprocessor
+
+    if preprocessor is None:
+        return [ensure_feature_columns(instance) for instance in instances]
+    return preprocessor.enrich_instances(instances)
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -279,9 +297,10 @@ async def predict(request: PredictRequest):
     request_batch_size_hist.observe(len(request.instances))
 
     try:
-        feature_matrix, user_ids, recipe_ids = assemble_features(request.instances)
+        enriched_instances = preprocess_instances(request.instances)
+        feature_matrix, user_ids, recipe_ids = assemble_features(enriched_instances)
         dmatrix = xgb.DMatrix(feature_matrix, feature_names=FEATURE_COLUMNS)
-        dmatrix.set_group([len(request.instances)])
+        dmatrix.set_group([len(enriched_instances)])
         scores = model.predict(dmatrix)
     except Exception as exc:
         logger.exception("Feature assembly / inference failed")
@@ -319,7 +338,7 @@ async def predict(request: PredictRequest):
                 model_version=version,
                 predictions=predictions,
                 timestamp=now,
-                features=request.instances,
+                features=enriched_instances,
             )
             prediction_last_logged_timestamp.set(time.time())
         except Exception as exc:
@@ -330,7 +349,7 @@ async def predict(request: PredictRequest):
             await prediction_logger.log_features(
                 request_id=request.request_id,
                 model_version=version,
-                instances=request.instances,
+                instances=enriched_instances,
             )
         except Exception as exc:
             logger.warning("Feature logging failed (non-fatal): %s", exc)

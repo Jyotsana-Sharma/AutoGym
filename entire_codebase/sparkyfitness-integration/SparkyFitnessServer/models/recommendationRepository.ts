@@ -5,6 +5,7 @@ export interface MealCandidate {
   meal_id: string;
   meal_name: string;
   description: string | null;
+  ingredient_text: string | null;
   serving_size: number | null;
   serving_unit: string | null;
   calories: number | null;
@@ -23,6 +24,15 @@ export interface UserGoals {
   protein: number;
   carbs: number;
   fat: number;
+}
+
+export interface RecentLoggedMealHistory {
+  text_documents: string[];
+  ingredient_documents: string[];
+  avg_calories: number;
+  avg_protein_g: number;
+  avg_carbohydrate_g: number;
+  avg_total_fat_g: number;
 }
 
 export interface SavedRecommendation {
@@ -52,8 +62,10 @@ async function getUserGoals(userId: any): Promise<UserGoals> {
     const result = await client.query(
       `SELECT calories, protein, carbs, fat
          FROM user_goals
+        WHERE user_id = $1
         ORDER BY updated_at DESC, created_at DESC
-        LIMIT 1`
+        LIMIT 1`,
+      [userId]
     );
     if (result.rows.length === 0) {
       return { calories: 2000, protein: 50, carbs: 250, fat: 65 };
@@ -78,10 +90,78 @@ async function getRecentlyLoggedMealIds(userId: any, days: number): Promise<Set<
       `SELECT DISTINCT meal_template_id
          FROM food_entry_meals
         WHERE meal_template_id IS NOT NULL
-          AND entry_date >= CURRENT_DATE - ($1 * interval '1 day')`,
-      [days]
+          AND user_id = $1
+          AND entry_date >= CURRENT_DATE - ($2 * interval '1 day')`,
+      [userId, days]
     );
     return new Set(result.rows.map((r: any) => r.meal_template_id as string));
+  } finally {
+    client.release();
+  }
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function getRecentLoggedMealHistory(userId: any, limit: number): Promise<RecentLoggedMealHistory> {
+  const client = await getClient(userId);
+  try {
+    const result = await client.query(
+      `WITH recent AS (
+         SELECT entry_date, meal_template_id
+           FROM food_entry_meals
+          WHERE meal_template_id IS NOT NULL
+            AND user_id = $1
+          ORDER BY entry_date DESC
+          LIMIT $2
+       )
+       SELECT
+         recent.meal_template_id                                                  AS meal_id,
+         m.name                                                                   AS meal_name,
+         COALESCE(m.description, '')                                              AS description,
+         COALESCE(STRING_AGG(LOWER(REGEXP_REPLACE(COALESCE(f.name, ''), '[^a-z0-9]+', ' ', 'g')), ' '), '') AS ingredient_text,
+         COALESCE(SUM(fv.calories      * mf.quantity / NULLIF(fv.serving_size, 0)), 0) AS calories,
+         COALESCE(SUM(fv.protein       * mf.quantity / NULLIF(fv.serving_size, 0)), 0) AS protein,
+         COALESCE(SUM(fv.carbs         * mf.quantity / NULLIF(fv.serving_size, 0)), 0) AS carbs,
+         COALESCE(SUM(fv.fat           * mf.quantity / NULLIF(fv.serving_size, 0)), 0) AS fat
+       FROM recent
+       JOIN meals m ON m.id = recent.meal_template_id
+       LEFT JOIN meal_foods mf ON mf.meal_id = m.id
+       LEFT JOIN food_variants fv ON fv.id = mf.variant_id
+       LEFT JOIN foods f ON f.id = fv.food_id
+       GROUP BY recent.entry_date, recent.meal_template_id, m.name, m.description
+       ORDER BY recent.entry_date DESC`,
+      [userId, limit]
+    );
+
+    if (result.rows.length === 0) {
+      return {
+        text_documents: [],
+        ingredient_documents: [],
+        avg_calories: 0,
+        avg_protein_g: 0,
+        avg_carbohydrate_g: 0,
+        avg_total_fat_g: 0,
+      };
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rows = result.rows.map((r: any) => ({
+      text: [r.meal_name, r.description].filter(Boolean).join(' ').trim(),
+      ingredient_text: (r.ingredient_text ?? '').trim(),
+      calories: Number(r.calories) || 0,
+      protein: Number(r.protein) || 0,
+      carbs: Number(r.carbs) || 0,
+      fat: Number(r.fat) || 0,
+    }));
+
+    const count = rows.length || 1;
+    return {
+      text_documents: rows.map(r => r.text).filter(Boolean),
+      ingredient_documents: rows.map(r => r.ingredient_text).filter(Boolean),
+      avg_calories: rows.reduce((sum, row) => sum + row.calories, 0) / count,
+      avg_protein_g: rows.reduce((sum, row) => sum + row.protein, 0) / count,
+      avg_carbohydrate_g: rows.reduce((sum, row) => sum + row.carbs, 0) / count,
+      avg_total_fat_g: rows.reduce((sum, row) => sum + row.fat, 0) / count,
+    };
   } finally {
     client.release();
   }
@@ -102,6 +182,7 @@ async function getCandidateMeals(userId: any, excludeMealIds: Set<string>, limit
            m.id                                                                 AS meal_id,
            m.name                                                               AS meal_name,
            m.description,
+           COALESCE(STRING_AGG(LOWER(REGEXP_REPLACE(COALESCE(f.name, ''), '[^a-z0-9]+', ' ', 'g')), ' '), '') AS ingredient_text,
            m.serving_size,
            m.serving_unit,
            COUNT(mf.id)                                                         AS n_ingredients,
@@ -116,6 +197,7 @@ async function getCandidateMeals(userId: any, excludeMealIds: Set<string>, limit
          FROM meals m
          LEFT JOIN meal_foods mf ON mf.meal_id = m.id
          LEFT JOIN food_variants fv ON fv.id = mf.variant_id
+         LEFT JOIN foods f ON f.id = fv.food_id
          WHERE (m.is_public = TRUE OR m.user_id = $1)
            ${excludeClause}
          GROUP BY m.id, m.name, m.description, m.serving_size, m.serving_unit
@@ -130,6 +212,7 @@ async function getCandidateMeals(userId: any, excludeMealIds: Set<string>, limit
         meal_id: r.meal_id,
         meal_name: r.meal_name,
         description: r.description ?? null,
+        ingredient_text: r.ingredient_text ?? null,
         serving_size: r.serving_size ? Number(r.serving_size) : null,
         serving_unit: r.serving_unit ?? null,
         n_ingredients: Number(r.n_ingredients),
@@ -149,6 +232,7 @@ async function getCandidateMeals(userId: any, excludeMealIds: Set<string>, limit
            f.id             AS meal_id,
            f.name           AS meal_name,
            f.brand          AS description,
+           LOWER(REGEXP_REPLACE(TRIM(CONCAT_WS(' ', f.name, f.brand)), '[^a-z0-9]+', ' ', 'g')) AS ingredient_text,
            fv.serving_size,
            fv.serving_unit,
            1                AS n_ingredients,
@@ -173,6 +257,7 @@ async function getCandidateMeals(userId: any, excludeMealIds: Set<string>, limit
       meal_id: r.meal_id,
       meal_name: r.meal_name,
       description: r.description ?? null,
+      ingredient_text: r.ingredient_text ?? null,
       serving_size: r.serving_size ? Number(r.serving_size) : null,
       serving_unit: r.serving_unit ?? null,
       n_ingredients: Number(r.n_ingredients),
@@ -296,6 +381,7 @@ async function logInteraction(userId: any, recommendationId: string, action: str
 export default {
   getUserGoals,
   getRecentlyLoggedMealIds,
+  getRecentLoggedMealHistory,
   getCandidateMeals,
   saveRecommendations,
   getRecommendationForFeedback,

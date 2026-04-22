@@ -1,10 +1,15 @@
 import { log } from '../config/logging.js';
-import recommendationRepository, { MealCandidate, UserGoals } from '../models/recommendationRepository.js';
+import recommendationRepository, {
+  MealCandidate,
+  RecentLoggedMealHistory,
+  UserGoals,
+} from '../models/recommendationRepository.js';
 import { createHash, randomUUID } from 'crypto';
 
 const ML_URL = process.env.ML_RECOMMENDATION_URL ?? 'http://localhost:8000';
 const ML_MODEL_NAME = process.env.ML_MODEL_NAME ?? 'sparky-ranker';
 const CANDIDATE_POOL_SIZE = 200;
+const HISTORY_WINDOW_SIZE = 10;
 
 // ---------------------------------------------------------------------------
 // Feature engineering helpers
@@ -24,7 +29,22 @@ function toPDV(value: number | null, ref: number): number {
   return (value / ref) * 100;
 }
 
-function buildFeatureVector(meal: MealCandidate, goals: UserGoals): Record<string, number | string> {
+function defaultHistory(): RecentLoggedMealHistory {
+  return {
+    text_documents: [],
+    ingredient_documents: [],
+    avg_calories: 0,
+    avg_protein_g: 0,
+    avg_carbohydrate_g: 0,
+    avg_total_fat_g: 0,
+  };
+}
+
+function buildFeatureVector(
+  meal: MealCandidate,
+  goals: UserGoals,
+  history: RecentLoggedMealHistory
+): Record<string, number | string> {
   const cal = meal.calories ?? 0;
   const fat = meal.fat ?? 0;
   const sugar = meal.sugars ?? 0;
@@ -63,6 +83,15 @@ function buildFeatureVector(meal: MealCandidate, goals: UserGoals): Record<strin
     user_dairy_free: 0, user_low_sodium: 0, user_low_fat: 0,
     history_pc1: 0, history_pc2: 0, history_pc3: 0,
     history_pc4: 0, history_pc5: 0, history_pc6: 0,
+    candidate_name_text: meal.meal_name,
+    candidate_description_text: meal.description ?? '',
+    candidate_ingredient_text: meal.ingredient_text ?? '',
+    user_history_name_text: JSON.stringify(history.text_documents ?? []),
+    user_history_ingredient_text: JSON.stringify(history.ingredient_documents ?? []),
+    user_history_avg_calories: history.avg_calories ?? 0,
+    user_history_avg_protein_g: history.avg_protein_g ?? 0,
+    user_history_avg_carbohydrate_g: history.avg_carbohydrate_g ?? 0,
+    user_history_avg_total_fat_g: history.avg_total_fat_g ?? 0,
   };
 }
 
@@ -140,9 +169,10 @@ async function callMLPredict(requestId: string, instances: MLInstance[]): Promis
 // ---------------------------------------------------------------------------
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function getRecommendations(userId: any, limit: number, excludeRecentDays: number) {
-  const [goals, recentlyLogged] = await Promise.all([
+  const [goals, recentlyLogged, recentHistory] = await Promise.all([
     recommendationRepository.getUserGoals(userId).catch(() => ({ calories: 2000, protein: 50, carbs: 250, fat: 65 })),
     recommendationRepository.getRecentlyLoggedMealIds(userId, excludeRecentDays).catch(() => new Set<string>()),
+    recommendationRepository.getRecentLoggedMealHistory(userId, HISTORY_WINDOW_SIZE).catch(() => defaultHistory()),
   ]);
 
   const candidates = await recommendationRepository.getCandidateMeals(userId, recentlyLogged, CANDIDATE_POOL_SIZE);
@@ -163,7 +193,7 @@ async function getRecommendations(userId: any, limit: number, excludeRecentDays:
       user_id: mlUserId,
       recipe_id: mlRecipeId,
       recommendation_id: recommendationId,
-      ...buildFeatureVector(meal, goals),
+      ...buildFeatureVector(meal, goals, recentHistory),
     };
   });
 

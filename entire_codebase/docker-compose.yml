@@ -148,7 +148,11 @@ services:
              cp /output/train.csv /training-data/train.csv &&
              cp /output/val.csv /training-data/val.csv &&
              cp /output/test.csv /training-data/test.csv &&
-             cp /output/manifest.json /training-data/manifest.json"
+             cp /output/manifest.json /training-data/manifest.json &&
+             if [ -d /output/embedding_artifacts ]; then
+               rm -rf /training-data/embedding_artifacts;
+               cp -R /output/embedding_artifacts /training-data/embedding_artifacts;
+             fi"
 
   drift-monitor:
     build:
