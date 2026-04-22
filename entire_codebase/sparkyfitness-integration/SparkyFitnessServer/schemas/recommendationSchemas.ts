@@ -16,7 +16,10 @@ export type GetRecommendationsQuery = z.infer<
 // ── Body for POST /recommendations/feedback ──────────────────────────────────
 export const RecommendationFeedbackBodySchema = z.object({
   recommendation_id: z.string().uuid(),
-  action: z.enum(["viewed", "logged", "dismissed", "saved"]),
+  // "not_interested" is the explicit negative signal — distinct from a low
+  // rating, which implies engagement. Only items the user actively rejects
+  // without trying are used as hard negatives in retraining.
+  action: z.enum(["viewed", "logged", "dismissed", "saved", "not_interested"]),
 });
 
 export type RecommendationFeedbackBody = z.infer<
@@ -30,6 +33,10 @@ export const RecommendedMealSchema = z.object({
   meal_name: z.string(),
   description: z.string().nullable(),
   score: z.number(),
+  // "personalized" = top ML picks for this user
+  // "discover"     = good score but outside the user's usual macro pattern
+  // "goals"        = closest macro alignment to the user's daily targets
+  bucket: z.enum(["personalized", "discover", "goals"]).default("personalized"),
   calories: z.number().nullable(),
   protein_g: z.number().nullable(),
   carbs_g: z.number().nullable(),

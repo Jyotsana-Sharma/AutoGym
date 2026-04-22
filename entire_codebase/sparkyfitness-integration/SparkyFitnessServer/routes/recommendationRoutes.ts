@@ -12,7 +12,7 @@ const GetRecommendationsQuerySchema = z.object({
 
 const FeedbackBodySchema = z.object({
   recommendation_id: z.string().uuid(),
-  action: z.enum(['viewed', 'logged', 'dismissed', 'saved']),
+  action: z.enum(['viewed', 'logged', 'dismissed', 'saved', 'not_interested']),
 });
 
 /**

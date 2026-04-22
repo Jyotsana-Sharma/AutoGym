@@ -237,10 +237,55 @@ def enrich_recipes(df_recipes, df_interact):
 # ─────────────────────────────────────────────────────────────
 
 def build_labels(df_interact):
-    """rating >= POSITIVE_RATING_THRESHOLD → label 1, else 0."""
+    """
+    rating >= 4  → label 1 (positive — user genuinely liked it)
+    rating <= 2  → label 0 (explicit negative — user disliked it)
+    rating == 3  → excluded (neutral engagement; treating it as negative
+                   would penalise mild interest and corrupt the ranking signal)
+
+    For live interaction data that carries an 'action' column:
+    - 'not_interested' / 'dismissed' with no follow-up  → label 0 (strong negative)
+    - 'served' with no positive follow-up               → label 0 (implicit negative)
+    - 'logged' / 'saved' / 'cooked'                     → label 1 (implicit positive)
+    """
     print("\n── STEP 2: Building labels ────────────────────────────")
     df = df_interact.copy()
-    df["label"] = (df["rating"] >= POSITIVE_RATING_THRESHOLD).astype(int)
+
+    if "action" in df.columns:
+        # Live feedback path: derive labels from explicit actions first,
+        # fall back to rating for rows that have one.
+        positive_actions = {"logged", "saved", "cooked", "cook"}
+        negative_actions = {"not_interested", "dismissed", "skip"}
+
+        def _action_label(row):
+            action = str(row.get("action", "")).lower()
+            if action in positive_actions:
+                return 1
+            if action in negative_actions:
+                return 0
+            rating = row.get("rating")
+            if rating is not None:
+                if rating >= POSITIVE_RATING_THRESHOLD:
+                    return 1
+                if rating <= 2:
+                    return 0
+            # 'served' with no strong signal and no rating → implicit negative
+            return 0 if action == "served" else None
+
+        df["label"] = df.apply(_action_label, axis=1)
+        df = df.dropna(subset=["label"])
+        df["label"] = df["label"].astype(int)
+    else:
+        # Historical dataset path (Food.com Kaggle): rating-only labels.
+        # Drop neutral rating=3 rows — they are ambiguous and act as noise
+        # when used as negatives, because users who rated something 3/5
+        # still engaged with it willingly.
+        neutral_count = (df["rating"] == 3).sum()
+        df = df[df["rating"] != 3].copy()
+        df["label"] = (df["rating"] >= POSITIVE_RATING_THRESHOLD).astype(int)
+        if neutral_count:
+            print(f"  Dropped {neutral_count:,} neutral ratings (rating=3)")
+
     pos = df["label"].sum()
     neg = len(df) - pos
     print(f"  Positive (label=1): {pos:,}  |  Negative (label=0): {neg:,}")

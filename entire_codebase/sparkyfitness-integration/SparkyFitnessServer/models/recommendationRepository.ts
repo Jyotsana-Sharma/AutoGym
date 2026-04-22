@@ -1,6 +1,15 @@
 import { getClient } from '../db/poolManager.js';
 import { log } from '../config/logging.js';
 
+export interface UserHistory {
+  avg_calories: number;
+  avg_protein: number;
+  avg_carbs: number;
+  avg_fat: number;
+  avg_sodium: number;
+  item_count: number;
+}
+
 export interface MealCandidate {
   meal_id: string;
   meal_name: string;
@@ -293,10 +302,124 @@ async function logInteraction(userId: any, recommendationId: string, action: str
   }
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function getUserHistory(userId: any, days: number = 30): Promise<UserHistory> {
+  const client = await getClient(userId);
+  try {
+    const result = await client.query(
+      `SELECT
+           COUNT(DISTINCT fem.id)                                                          AS item_count,
+           AVG(meal_nutrition.calories)                                                    AS avg_calories,
+           AVG(meal_nutrition.protein)                                                     AS avg_protein,
+           AVG(meal_nutrition.carbs)                                                       AS avg_carbs,
+           AVG(meal_nutrition.fat)                                                         AS avg_fat,
+           AVG(meal_nutrition.sodium)                                                      AS avg_sodium
+         FROM food_entry_meals fem
+         JOIN (
+           SELECT
+               mf.meal_id,
+               SUM(fv.calories      * mf.quantity / NULLIF(fv.serving_size, 0)) AS calories,
+               SUM(fv.protein       * mf.quantity / NULLIF(fv.serving_size, 0)) AS protein,
+               SUM(fv.carbs         * mf.quantity / NULLIF(fv.serving_size, 0)) AS carbs,
+               SUM(fv.fat           * mf.quantity / NULLIF(fv.serving_size, 0)) AS fat,
+               SUM(fv.sodium        * mf.quantity / NULLIF(fv.serving_size, 0)) AS sodium
+             FROM meal_foods mf
+             JOIN food_variants fv ON fv.id = mf.variant_id
+             GROUP BY mf.meal_id
+         ) AS meal_nutrition ON meal_nutrition.meal_id = fem.meal_template_id
+         WHERE fem.meal_template_id IS NOT NULL
+           AND fem.entry_date >= CURRENT_DATE - ($1 * interval '1 day')`,
+      [days]
+    );
+    const r = result.rows[0];
+    return {
+      item_count: Number(r?.item_count ?? 0),
+      avg_calories: Number(r?.avg_calories ?? 0),
+      avg_protein: Number(r?.avg_protein ?? 0),
+      avg_carbs: Number(r?.avg_carbs ?? 0),
+      avg_fat: Number(r?.avg_fat ?? 0),
+      avg_sodium: Number(r?.avg_sodium ?? 0),
+    };
+  } catch (err) {
+    log('warn', '[RecommendationRepository] getUserHistory failed, using empty history', err);
+    return { item_count: 0, avg_calories: 0, avg_protein: 0, avg_carbs: 0, avg_fat: 0, avg_sodium: 0 };
+  } finally {
+    client.release();
+  }
+}
+
+// Returns top public meals ordered by nutritional completeness — used for cold start.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function getPopularPublicMeals(limit: number, excludeIds: Set<string>): Promise<MealCandidate[]> {
+  // Use a system-level client since this is a global query, not user-specific.
+  // Fall back to a known public user or anonymous connection.
+  const client = await getClient('system').catch(() => getClient(null));
+  try {
+    const excluded = excludeIds.size > 0 ? [...excludeIds] : [];
+    const excludeClause = excluded.length > 0
+      ? `AND m.id NOT IN (${excluded.map((_: unknown, i: number) => `$${i + 2}`).join(',')})`
+      : '';
+
+    const result = await client.query(
+      `SELECT
+           m.id                                                                 AS meal_id,
+           m.name                                                               AS meal_name,
+           m.description,
+           m.serving_size,
+           m.serving_unit,
+           COUNT(mf.id)                                                         AS n_ingredients,
+           SUM(fv.calories      * mf.quantity / NULLIF(fv.serving_size, 0))    AS calories,
+           SUM(fv.protein       * mf.quantity / NULLIF(fv.serving_size, 0))    AS protein,
+           SUM(fv.carbs         * mf.quantity / NULLIF(fv.serving_size, 0))    AS carbs,
+           SUM(fv.fat           * mf.quantity / NULLIF(fv.serving_size, 0))    AS fat,
+           SUM(fv.saturated_fat * mf.quantity / NULLIF(fv.serving_size, 0))    AS saturated_fat,
+           SUM(fv.sugars        * mf.quantity / NULLIF(fv.serving_size, 0))    AS sugars,
+           SUM(fv.sodium        * mf.quantity / NULLIF(fv.serving_size, 0))    AS sodium,
+           SUM(fv.dietary_fiber * mf.quantity / NULLIF(fv.serving_size, 0))    AS dietary_fiber
+         FROM meals m
+         LEFT JOIN meal_foods mf ON mf.meal_id = m.id
+         LEFT JOIN food_variants fv ON fv.id = mf.variant_id
+         WHERE m.is_public = TRUE
+           ${excludeClause}
+         GROUP BY m.id, m.name, m.description, m.serving_size, m.serving_unit
+         HAVING SUM(fv.calories * mf.quantity / NULLIF(fv.serving_size, 0)) > 0
+            AND SUM(fv.protein  * mf.quantity / NULLIF(fv.serving_size, 0)) > 0
+         ORDER BY SUM(fv.protein * mf.quantity / NULLIF(fv.serving_size, 0)) DESC NULLS LAST
+         LIMIT $1`,
+      [limit, ...excluded]
+    );
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return result.rows.map((r: any) => ({
+      meal_id: r.meal_id,
+      meal_name: r.meal_name,
+      description: r.description ?? null,
+      serving_size: r.serving_size ? Number(r.serving_size) : null,
+      serving_unit: r.serving_unit ?? null,
+      n_ingredients: Number(r.n_ingredients),
+      calories: r.calories ? Number(r.calories) : null,
+      protein: r.protein ? Number(r.protein) : null,
+      carbs: r.carbs ? Number(r.carbs) : null,
+      fat: r.fat ? Number(r.fat) : null,
+      saturated_fat: r.saturated_fat ? Number(r.saturated_fat) : null,
+      sugars: r.sugars ? Number(r.sugars) : null,
+      sodium: r.sodium ? Number(r.sodium) : null,
+      dietary_fiber: r.dietary_fiber ? Number(r.dietary_fiber) : null,
+    }));
+  } catch (err) {
+    log('warn', '[RecommendationRepository] getPopularPublicMeals failed', err);
+    return [];
+  } finally {
+    client.release();
+  }
+}
+
 export default {
   getUserGoals,
   getRecentlyLoggedMealIds,
   getCandidateMeals,
+  getUserHistory,
+  getPopularPublicMeals,
   saveRecommendations,
   getRecommendationForFeedback,
   logInteraction,
