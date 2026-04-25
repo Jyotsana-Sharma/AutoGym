@@ -6,16 +6,53 @@ from pathlib import Path
 import pandas as pd
 from pandas import DataFrame
 
+from src.serving.feature_contract import REQUEST_ONLY_FIELDS
+
 
 NON_FEATURE_COLUMNS = {
     "user_id",
     "recipe_id",
     "date",
     "label",
+    "rating",
+    "group_id",
     "name",
+    "data_source",
     "request_id",
     "recommendation_id",
 }
+NON_FEATURE_COLUMNS.update(REQUEST_ONLY_FIELDS)
+
+# Heuristic-only fields are useful for product logic, explanations, or
+# fallback rankers, but they should not be learned by the offline model. Most
+# of these are either target/remaining-day calculations or live-only signals
+# that are constant in the offline recipe data, which creates train/serve skew.
+HEURISTIC_ONLY_COLUMNS = {
+    "daily_calorie_target",
+    "protein_target_g",
+    "carbs_target_g",
+    "fat_target_g",
+    "remaining_calorie_ratio",
+    "remaining_protein_ratio",
+    "remaining_carb_ratio",
+    "remaining_fat_ratio",
+    "goal_calorie_gap_ratio",
+    "goal_protein_gap_ratio",
+    "goal_carb_gap_ratio",
+    "goal_fat_gap_ratio",
+    "candidate_is_food",
+    "candidate_is_user_owned",
+    "candidate_is_public",
+    "community_logged_count",
+    "community_saved_count",
+    "community_dismissed_count",
+    "recently_logged_candidate",
+    "recently_dismissed_candidate",
+    "recently_seen_candidate",
+    "basket_lift_score",
+    "meal_type_match",
+}
+NON_FEATURE_COLUMNS.update(HEURISTIC_ONLY_COLUMNS)
 
 
 @dataclass

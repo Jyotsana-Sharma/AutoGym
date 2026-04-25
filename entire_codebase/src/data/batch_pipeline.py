@@ -9,6 +9,10 @@ from datetime import datetime
 from pathlib import Path
 import pandas as pd
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 try:
     import swiftclient
     HAS_SWIFT = True
@@ -18,7 +22,17 @@ except ImportError:
 try: import psycopg2; HAS_PG=True
 except ImportError: HAS_PG=False
 
+try:
+    from src.serving.feature_contract import FEATURE_COLUMNS
+except Exception:
+    FEATURE_COLUMNS = []
+
 PIPELINE_VERSION="1.0.0"; RAW_BUCKET="proj04-sparky-raw-data"; TRAINING_BUCKET="proj04-sparky-training-data"
+ONLINE_UPSAMPLE_FACTOR = 5
+ACTION_LABEL_MAP = {"logged": 1, "saved": 1, "dismissed": 0, "viewed": 0}
+ACTION_PRIORITY = {"logged": 3, "saved": 3, "dismissed": 2, "viewed": 1}
+POSITIVE_RATING_THRESHOLD = 4.0
+NEGATIVE_RATING_THRESHOLD = 2.0
 
 def sha256_file(p):
     h=hashlib.sha256()
@@ -67,11 +81,205 @@ def export_pg_interactions(db_url, out_path):
     if not HAS_PG: return None
     try:
         conn=psycopg2.connect(db_url)
-        df=pd.read_sql("SELECT user_id,recipe_id,rating,created_at AS date FROM user_interactions ORDER BY created_at",conn)
+        df=pd.read_sql(
+            """
+            SELECT user_id, recipe_id, rating, created_at AS date
+            FROM user_interactions
+            WHERE rating IS NOT NULL
+            ORDER BY created_at
+            """,
+            conn
+        )
         conn.close()
         if len(df): df.to_csv(out_path,index=False); print(f"  Exported {len(df):,} production interactions"); return df
     except Exception as e: print(f"  DB export: {e}")
     return None
+
+
+def feature_default(name):
+    return "unknown" if name == "cuisine" else 0.0
+
+
+def infer_online_label(record):
+    action = (record.get("action") or "").strip().lower()
+    if action in ACTION_LABEL_MAP:
+        return ACTION_LABEL_MAP[action]
+
+    rating = record.get("rating")
+    if rating is None or rating == "":
+        return None
+
+    try:
+        rating_value = float(rating)
+    except (TypeError, ValueError):
+        return None
+
+    if rating_value >= POSITIVE_RATING_THRESHOLD:
+        return 1
+    if rating_value <= NEGATIVE_RATING_THRESHOLD:
+        return 0
+    return None
+
+
+def online_feedback_priority(record, label):
+    action = (record.get("action") or "").strip().lower()
+    if action in ACTION_PRIORITY:
+        return ACTION_PRIORITY[action]
+    return 3 if label == 1 else 2
+
+
+def online_feedback_key(record):
+    recommendation_id = record.get("recommendation_id")
+    if recommendation_id:
+        return str(recommendation_id)
+    return ":".join(
+        str(record.get(key, ""))
+        for key in ("request_id", "inf_user_id", "inf_recipe_id")
+    )
+
+
+def choose_online_training_records(records):
+    chosen = {}
+    for record in records:
+        label = infer_online_label(record)
+        if label is None:
+            continue
+        key = online_feedback_key(record)
+        priority = online_feedback_priority(record, label)
+        current = chosen.get(key)
+        if current is None or priority >= current[0]:
+            chosen[key] = (priority, label, record)
+    return [(label, record) for _, label, record in chosen.values()]
+
+
+def build_online_training_rows(records, upsample_factor=ONLINE_UPSAMPLE_FACTOR):
+    rows = []
+    for label, record in choose_online_training_records(records):
+        inf_user_id = int(record["inf_user_id"])
+        inf_recipe_id = int(record["inf_recipe_id"])
+        fb_user_id = int(record["fb_user_id"])
+        fb_recipe_id = int(record["fb_recipe_id"])
+        if inf_user_id != fb_user_id or inf_recipe_id != fb_recipe_id:
+            continue
+
+        payload = record.get("features_json")
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        if not isinstance(payload, dict):
+            continue
+
+        row = {
+            "user_id": inf_user_id,
+            "recipe_id": inf_recipe_id,
+            "date": record.get("date"),
+            "label": label,
+            "data_source": "online",
+            "request_id": record.get("request_id"),
+            "recommendation_id": record.get("recommendation_id"),
+        }
+        for col in FEATURE_COLUMNS:
+            row[col] = payload.get(col, feature_default(col))
+        rows.append(row)
+
+    if not rows:
+        return pd.DataFrame()
+
+    frame = pd.DataFrame(rows)
+    if upsample_factor > 1:
+        frame = pd.concat([frame] * upsample_factor, ignore_index=True)
+    return frame
+
+
+def export_online_training_rows(db_url, out_path):
+    if not HAS_PG:
+        return pd.DataFrame()
+    try:
+        conn = psycopg2.connect(db_url)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    inf.request_id,
+                    inf.recommendation_id,
+                    inf.user_id AS inf_user_id,
+                    inf.recipe_id AS inf_recipe_id,
+                    inf.features::text AS features_json,
+                    fb.user_id AS fb_user_id,
+                    fb.recipe_id AS fb_recipe_id,
+                    fb.rating,
+                    fb.action,
+                    COALESCE(fb.feedback_at, inf.captured_at) AS date
+                FROM inference_features inf
+                JOIN user_feedback fb
+                  ON inf.request_id = fb.request_id
+                 AND inf.recommendation_id = fb.recommendation_id
+                WHERE fb.action IN ('logged', 'saved', 'dismissed', 'viewed')
+                   OR fb.rating IS NOT NULL
+                ORDER BY COALESCE(fb.feedback_at, inf.captured_at)
+                """
+            )
+            cols = [desc[0] for desc in cur.description]
+            records = [dict(zip(cols, row)) for row in cur.fetchall()]
+        conn.close()
+        frame = build_online_training_rows(records)
+        if len(frame):
+            frame.to_csv(out_path, index=False)
+            print(f"  Exported {len(frame):,} upsampled online training rows")
+        return frame
+    except Exception as e:
+        print(f"  Online feedback export: {e}")
+        return pd.DataFrame()
+
+
+def _temporal_split(frame, train_frac=0.80, val_frac=0.10):
+    frame = frame.copy()
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce", utc=True)
+    frame = frame.sort_values("date").reset_index(drop=True)
+    n = len(frame)
+    train_end = int(n * train_frac)
+    val_end = int(n * (train_frac + val_frac))
+    return (
+        frame.iloc[:train_end].copy(),
+        frame.iloc[train_end:val_end].copy(),
+        frame.iloc[val_end:].copy(),
+    )
+
+
+def split_training_frame(training, train_frac=0.80, val_frac=0.10):
+    """Split training rows while preserving live feedback in the train split.
+
+    Online feedback is newer than the static Food.com corpus. A single global
+    temporal split pushes most or all online rows into validation/test, which
+    makes retraining evaluate on feedback the model never learned from. Split
+    each source independently so live user feedback is represented in training
+    while still keeping a live holdout when enough rows are available.
+    """
+    training = training.copy()
+    if "data_source" not in training.columns:
+        return _temporal_split(training, train_frac=train_frac, val_frac=val_frac)
+
+    training["data_source"] = training["data_source"].fillna("offline").astype(str)
+    split_parts = {"train": [], "val": [], "test": []}
+    for _, source_frame in training.groupby("data_source", sort=False):
+        train_part, val_part, test_part = _temporal_split(
+            source_frame,
+            train_frac=train_frac,
+            val_frac=val_frac,
+        )
+        split_parts["train"].append(train_part)
+        split_parts["val"].append(val_part)
+        split_parts["test"].append(test_part)
+
+    def combine(parts):
+        if not parts:
+            return pd.DataFrame(columns=training.columns)
+        return pd.concat(parts, ignore_index=True, sort=False).sort_values("date").reset_index(drop=True)
+
+    return (
+        combine(split_parts["train"]),
+        combine(split_parts["val"]),
+        combine(split_parts["test"]),
+    )
 
 def validate(train,val,test):
     print("\n-- Data Quality Checks --"); ok=0
@@ -79,16 +287,28 @@ def validate(train,val,test):
         if len(df)==0: raise ValueError(f"{name} split is empty!")
     print("  OK: No empty splits"); ok+=1
     if "date" in train.columns and "date" in test.columns:
-        tmax=pd.to_datetime(train["date"]).max(); tmin=pd.to_datetime(test["date"]).min()
-        if tmax<tmin: print(f"  OK: Temporal order (train max={tmax}, test min={tmin})"); ok+=1
-        else: raise ValueError(f"Temporal leakage! train max {tmax} >= test min {tmin}")
+        source_col = "data_source" if "data_source" in train.columns and "data_source" in test.columns else None
+        sources = sorted(set(train[source_col].dropna().astype(str)) | set(test[source_col].dropna().astype(str))) if source_col else [None]
+        for source in sources:
+            train_part = train[train[source_col].astype(str) == source] if source_col else train
+            test_part = test[test[source_col].astype(str) == source] if source_col else test
+            if train_part.empty or test_part.empty:
+                continue
+            tmax=pd.to_datetime(train_part["date"], errors="coerce", format="mixed", utc=True).max(); tmin=pd.to_datetime(test_part["date"], errors="coerce", format="mixed", utc=True).min()
+            label = f" for {source}" if source_col else ""
+            if tmax<tmin: print(f"  OK: Temporal order{label} (train max={tmax}, test min={tmin})"); ok+=1
+            else: raise ValueError(f"Temporal leakage{label}! train max {tmax} >= test min {tmin}")
     if "label" in train.columns:
         bal=train["label"].mean()
         print(f"  OK: Label balance: {bal:.1%} positive"); ok+=1
     crit=[c for c in ["user_id","recipe_id","label"] if c in train.columns]
     if train[crit].isnull().sum().sum()==0: print("  OK: No nulls in key columns"); ok+=1
     if "label" in train.columns:
-        fcols=[c for c in train.columns if c.startswith("daily_") or c.startswith("user_")]
+        fcols=[
+            c for c in train.columns
+            if (c.startswith("daily_") or c.startswith("user_"))
+            and c not in {"user_id", "label"}
+        ]
         if fcols:
             corrs=train[fcols+["label"]].corr()["label"].drop("label")
             bad=corrs[corrs.abs()>0.9]
@@ -162,6 +382,7 @@ def main():
     df_i=pd.read_csv(ip); df_i.columns=df_i.columns.str.strip().str.lower()
     print(f"  Recipes:      {df_r.shape}"); print(f"  Interactions: {df_i.shape}")
 
+    online_rows = pd.DataFrame()
     if args.db_url:
         print("\n-- Step 2: Merging production interactions --")
         prod=export_pg_interactions(args.db_url,out/"production_interactions.csv")
@@ -169,6 +390,7 @@ def main():
             prod.columns=prod.columns.str.strip().str.lower()
             if "rating" in prod.columns and "user_id" in prod.columns:
                 df_i=pd.concat([df_i,prod],ignore_index=True); print(f"  Merged total: {len(df_i):,}")
+        online_rows = export_online_training_rows(args.db_url, out/"online_training_rows.csv")
     else: print("\n-- Step 2: No DB URL — Kaggle data only --")
 
     print("\n-- Step 3: Running enrichment pipeline --")
@@ -177,7 +399,7 @@ def main():
     import subprocess
     btm_path = None
     for candidate in [
-        Path(__file__).parent/"build_training_table.py",   # src/data/ sibling
+        Path(__file__).resolve().parent/"build_training_table.py",  # src/data/ sibling
         raw/"build_training_table.py",                     # raw data dir (legacy)
         Path("build_training_table.py"),                   # cwd (legacy)
         Path("/app/build_training_table.py"),              # container root symlink
@@ -186,13 +408,25 @@ def main():
     if btm_path:
         print(f"  Using {btm_path}")
         env = os.environ.copy()
-        result = subprocess.run(["python", str(btm_path)], cwd=str(raw), env=env, capture_output=False)
+        env["PYTHONPATH"] = (
+            f"{PROJECT_ROOT}{os.pathsep}{env['PYTHONPATH']}"
+            if env.get("PYTHONPATH")
+            else str(PROJECT_ROOT)
+        )
+        result = subprocess.run(
+            [sys.executable, str(btm_path.resolve())],
+            cwd=str(raw),
+            env=env,
+            capture_output=False,
+        )
         if result.returncode != 0:
             print("  ERROR: build_training_table.py failed"); sys.exit(1)
         # Move output files to output dir
         for sp in ["enriched_recipes.csv","training_table.csv","train.csv","val.csv","test.csv"]:
             src = raw/sp
             if src.exists(): shutil.copy(str(src), str(out/sp))
+        if (raw / "embedding_artifacts").exists():
+            shutil.copytree(raw / "embedding_artifacts", out / "embedding_artifacts", dirs_exist_ok=True)
     else:
         print("  build_training_table.py not found, running inline fallback")
         df_r=df_r.rename(columns={"id":"recipe_id"})
@@ -214,7 +448,27 @@ def main():
         val_df.to_csv(out/"val.csv",index=False)
         test_df.to_csv(out/"test.csv",index=False)
 
-    train_df=pd.read_csv(out/"train.csv"); val_df=pd.read_csv(out/"val.csv"); test_df=pd.read_csv(out/"test.csv")
+    if len(online_rows):
+        print("\n-- Step 4: Appending online feedback rows --")
+        training_df = pd.read_csv(out/"training_table.csv")
+        if "data_source" not in training_df.columns:
+            training_df["data_source"] = "offline"
+        else:
+            training_df["data_source"] = training_df["data_source"].fillna("offline")
+        merged_training = pd.concat([training_df, online_rows], ignore_index=True, sort=False)
+        train_df, val_df, test_df = split_training_frame(merged_training)
+        merged_training.to_csv(out/"training_table.csv", index=False)
+        train_df.to_csv(out/"train.csv", index=False)
+        val_df.to_csv(out/"val.csv", index=False)
+        test_df.to_csv(out/"test.csv", index=False)
+        print(f"  Offline rows: {len(training_df):,}")
+        print(f"  Online rows:  {len(online_rows):,}")
+        print(f"  Total rows:   {len(merged_training):,}")
+
+    train_df = pd.read_csv(out/"train.csv")
+    val_df = pd.read_csv(out/"val.csv")
+    test_df = pd.read_csv(out/"test.csv")
+
     enriched=pd.read_csv(out/"enriched_recipes.csv")
     validate(train_df,val_df,test_df)
 
@@ -247,6 +501,11 @@ def main():
             fp=out/fn
             if fp.exists():
                 swift_upload_file(conn, TRAINING_BUCKET, f"{prefix}/{fn}", fp)
+        artifact_dir = out / "embedding_artifacts"
+        if artifact_dir.exists():
+            for fp in artifact_dir.iterdir():
+                if fp.is_file():
+                    swift_upload_file(conn, TRAINING_BUCKET, f"{prefix}/embedding_artifacts/{fp.name}", fp)
         swift_upload_bytes(conn, TRAINING_BUCKET, "latest", prefix.encode())
         print(f"  latest -> {prefix}")
         conn.close()

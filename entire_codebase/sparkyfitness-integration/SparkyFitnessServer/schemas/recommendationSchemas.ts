@@ -36,7 +36,13 @@ export const RecommendedMealSchema = z.object({
   fat_g: z.number().nullable(),
   serving_size: z.number().nullable(),
   serving_unit: z.string().nullable(),
+  candidate_type: z.enum(['meal', 'food']),
+  food_id: z.string().nullable(),
+  variant_id: z.string().nullable(),
+  strategy: z.enum(['cold_start', 'personalized']),
+  category_label: z.string(),
   reason: z.string(),
+  explanation: z.array(z.string()),
 });
 
 export type RecommendedMeal = z.infer<typeof RecommendedMealSchema>;

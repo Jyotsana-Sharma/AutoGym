@@ -7,6 +7,7 @@ const router = express.Router();
 
 const GetRecommendationsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(50).default(10),
+  meal_type: z.enum(['breakfast', 'lunch', 'dinner', 'snack', 'any']).default('any'),
   exclude_recent_days: z.coerce.number().int().min(0).max(30).default(7),
 });
 
@@ -25,13 +26,12 @@ router.get('/', async (req, res) => {
     if (!parsed.success) {
       return res.status(400).json({ error: parsed.error.flatten() });
     }
-    const { limit, exclude_recent_days } = parsed.data;
-    // @ts-expect-error userId is set by auth middleware
+    const { limit, exclude_recent_days, meal_type } = parsed.data;
     const userId = req.userId;
     if (!userId) return res.status(401).json({ error: 'Not authenticated' });
 
     const { recommendations, modelVersion } = await recommendationService.getRecommendations(
-      userId, limit, exclude_recent_days
+      userId, limit, exclude_recent_days, meal_type
     );
 
     return res.json({
@@ -55,7 +55,6 @@ router.post('/feedback', async (req, res) => {
     if (!parsed.success) {
       return res.status(400).json({ error: parsed.error.flatten() });
     }
-    // @ts-expect-error userId is set by auth middleware
     const userId = req.userId;
     if (!userId) return res.status(401).json({ error: 'Not authenticated' });
 

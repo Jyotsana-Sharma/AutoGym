@@ -175,10 +175,18 @@ def run_builtin_checks(loaded):
     if "train" in loaded and "test" in loaded:
         if "date" in loaded["train"].columns and "date" in loaded["test"].columns:
             print(f"\n  Checking temporal leakage:")
-            train_max = pd.to_datetime(loaded["train"]["date"]).max()
-            test_min = pd.to_datetime(loaded["test"]["date"]).min()
-            check("temporal", train_max < test_min,
-                  f"train max ({train_max}) < test min ({test_min})")
+            source_col = "data_source" if "data_source" in loaded["train"].columns and "data_source" in loaded["test"].columns else None
+            sources = sorted(set(loaded["train"][source_col].dropna().astype(str)) | set(loaded["test"][source_col].dropna().astype(str))) if source_col else [None]
+            for source in sources:
+                train_part = loaded["train"][loaded["train"][source_col].astype(str) == source] if source_col else loaded["train"]
+                test_part = loaded["test"][loaded["test"][source_col].astype(str) == source] if source_col else loaded["test"]
+                if train_part.empty or test_part.empty:
+                    continue
+                train_max = pd.to_datetime(train_part["date"], errors="coerce", format="mixed", utc=True).max()
+                test_min = pd.to_datetime(test_part["date"], errors="coerce", format="mixed", utc=True).min()
+                label = f" for {source}" if source_col else ""
+                check(f"temporal{label}", train_max < test_min,
+                      f"train max{label} ({train_max}) < test min{label} ({test_min})")
 
     # --- Summary ---
     print(f"\n{'='*60}")

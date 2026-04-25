@@ -1,27 +1,10 @@
-/**
- * RecipeRecommendations.tsx
- *
- * Personalized meal recommendation panel.
- * Uses the ML-powered /api/recommendations endpoint (SparkyFitness ML system).
- *
- * Usage: drop this component inside the Foods page or Meal Management page,
- * e.g. as a tab or sidebar section:
- *
- *   import RecipeRecommendations from "./RecipeRecommendations";
- *   <RecipeRecommendations />
- */
-
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  useRecommendations,
-  useRecommendationFeedback,
   useInvalidateRecommendations,
-  RecommendedMeal,
-} from "@/hooks/Foods/useRecommendations";
-
-// ---------------------------------------------------------------------------
-// Sub-components
-// ---------------------------------------------------------------------------
+  useRecommendationFeedback,
+  useRecommendations,
+} from '@/hooks/Foods/useRecommendations';
+import type { RecommendedMeal } from '@/hooks/Foods/useRecommendations';
 
 function NutrientBadge({
   label,
@@ -43,30 +26,38 @@ function NutrientBadge({
 
 function MealCard({
   rec,
+  busy,
   onLog,
   onDismiss,
   onSave,
 }: {
   rec: RecommendedMeal;
-  onLog: (rec: RecommendedMeal) => void;
-  onDismiss: (rec: RecommendedMeal) => void;
-  onSave: (rec: RecommendedMeal) => void;
+  busy: boolean;
+  onLog: (rec: RecommendedMeal) => Promise<void>;
+  onDismiss: (rec: RecommendedMeal) => Promise<void>;
+  onSave: (rec: RecommendedMeal) => Promise<void>;
 }) {
   return (
     <div className="flex flex-col gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm transition hover:shadow-md">
-      {/* Header */}
       <div className="flex items-start justify-between gap-2">
         <div>
-          <h3 className="text-sm font-semibold text-gray-900 leading-snug">
+          <div className="mb-1 flex flex-wrap gap-1">
+            <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-700">
+              {rec.category_label}
+            </span>
+            <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] text-gray-600">
+              {rec.candidate_type === 'meal' ? 'Meal' : 'Food'}
+            </span>
+          </div>
+          <h3 className="text-sm font-semibold leading-snug text-gray-900">
             {rec.meal_name}
           </h3>
           {rec.description && (
-            <p className="mt-0.5 text-xs text-gray-500 line-clamp-2">
+            <p className="mt-0.5 line-clamp-2 text-xs text-gray-500">
               {rec.description}
             </p>
           )}
         </div>
-        {/* Score pill */}
         {rec.score > 0 && (
           <span
             className="shrink-0 rounded-full px-2 py-0.5 text-xs font-medium"
@@ -80,7 +71,6 @@ function MealCard({
         )}
       </div>
 
-      {/* Nutrition badges */}
       <div className="flex flex-wrap gap-1.5">
         <NutrientBadge label="kcal" value={rec.calories} unit="" />
         <NutrientBadge label="P" value={rec.protein_g} unit="g" />
@@ -88,116 +78,129 @@ function MealCard({
         <NutrientBadge label="F" value={rec.fat_g} unit="g" />
       </div>
 
-      {/* Recommendation reason */}
-      <p className="text-xs italic text-indigo-600">{rec.reason}</p>
+      <div className="space-y-1 text-xs text-gray-600">
+        <p className="font-medium text-indigo-600">{rec.reason}</p>
+        {rec.explanation?.slice(0, 2).map((line) => (
+          <p key={line}>{line}</p>
+        ))}
+      </div>
 
-      {/* Actions */}
       <div className="flex gap-2 pt-1">
         <button
+          type="button"
+          disabled={busy}
           onClick={() => onLog(rec)}
-          className="flex-1 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          className="flex-1 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-60"
         >
           Add to Diary
         </button>
         <button
+          type="button"
+          disabled={busy}
           onClick={() => onSave(rec)}
-          className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50"
+          className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-60"
           title="Save for later"
         >
-          ★
+          Save
         </button>
         <button
+          type="button"
+          disabled={busy}
           onClick={() => onDismiss(rec)}
-          className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-400 hover:bg-gray-50"
+          className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs text-gray-400 hover:bg-gray-50 disabled:opacity-60"
           title="Dismiss"
         >
-          ✕
+          Hide
         </button>
       </div>
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Main component
-// ---------------------------------------------------------------------------
-
 interface Props {
-  /** Optionally restrict recommendations to a meal type */
-  mealType?: "breakfast" | "lunch" | "dinner" | "snack" | "any";
-  /** Max number of recommendations to show */
+  mealType?: 'breakfast' | 'lunch' | 'dinner' | 'snack' | 'any';
   limit?: number;
-  /**
-   * Called when the user clicks "Add to Diary".
-   * Implement this to call SparkyFitness's existing log-meal endpoint.
-   */
   onLogMeal?: (mealId: string) => void;
 }
 
 export default function RecipeRecommendations({
-  mealType = "any",
+  mealType = 'any',
   limit = 6,
   onLogMeal,
 }: Props) {
   const invalidateRecommendations = useInvalidateRecommendations();
+  const feedbackMutation = useRecommendationFeedback();
+  const viewedRecommendationIds = useRef<Set<string>>(new Set());
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
-
-  // ── Fetch recommendations ──────────────────────────────────────────────────
+  const [activeRecommendationId, setActiveRecommendationId] = useState<string | null>(null);
   const { data, isLoading, isError, refetch } = useRecommendations(mealType, limit);
 
-  // ── Feedback mutation ──────────────────────────────────────────────────────
-  const feedbackMutation = useRecommendationFeedback();
-
-  // ── Handlers ──────────────────────────────────────────────────────────────
   const handleLog = useCallback(
-    (rec: RecommendedMeal) => {
-      feedbackMutation.mutate({ id: rec.recommendation_id, action: "logged" });
-      onLogMeal?.(rec.meal_id);
+    async (rec: RecommendedMeal) => {
+      setActiveRecommendationId(rec.recommendation_id);
+      try {
+        await feedbackMutation.mutateAsync({ id: rec.recommendation_id, action: 'logged' });
+        setDismissed((prev) => new Set([...prev, rec.recommendation_id]));
+        invalidateRecommendations();
+        onLogMeal?.(rec.meal_id);
+      } finally {
+        setActiveRecommendationId(null);
+      }
     },
-    [feedbackMutation, onLogMeal]
+    [feedbackMutation, invalidateRecommendations, onLogMeal]
   );
 
   const handleDismiss = useCallback(
-    (rec: RecommendedMeal) => {
-      feedbackMutation.mutate({
-        id: rec.recommendation_id,
-        action: "dismissed",
-      });
-      setDismissed((prev) => new Set([...prev, rec.recommendation_id]));
+    async (rec: RecommendedMeal) => {
+      setActiveRecommendationId(rec.recommendation_id);
+      try {
+        await feedbackMutation.mutateAsync({ id: rec.recommendation_id, action: 'dismissed' });
+        setDismissed((prev) => new Set([...prev, rec.recommendation_id]));
+      } finally {
+        setActiveRecommendationId(null);
+      }
     },
     [feedbackMutation]
   );
 
   const handleSave = useCallback(
-    (rec: RecommendedMeal) => {
-      feedbackMutation.mutate({ id: rec.recommendation_id, action: "saved" });
+    async (rec: RecommendedMeal) => {
+      setActiveRecommendationId(rec.recommendation_id);
+      try {
+        await feedbackMutation.mutateAsync({ id: rec.recommendation_id, action: 'saved' });
+      } finally {
+        setActiveRecommendationId(null);
+      }
     },
     [feedbackMutation]
   );
 
-  // ── Filter out dismissed ───────────────────────────────────────────────────
   const visible =
     data?.recommendations
-      .filter((r) => !dismissed.has(r.recommendation_id))
+      .filter((recommendation) => !dismissed.has(recommendation.recommendation_id))
       .slice(0, limit) ?? [];
 
-  // ── Render ─────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    for (const recommendation of visible) {
+      if (viewedRecommendationIds.current.has(recommendation.recommendation_id)) continue;
+      viewedRecommendationIds.current.add(recommendation.recommendation_id);
+      feedbackMutation.mutate({ id: recommendation.recommendation_id, action: 'viewed' });
+    }
+  }, [feedbackMutation, visible]);
+
   return (
     <section aria-labelledby="rec-heading" className="w-full">
-      {/* Section header */}
       <div className="mb-4 flex items-center justify-between">
         <div>
-          <h2
-            id="rec-heading"
-            className="text-base font-semibold text-gray-900"
-          >
+          <h2 id="rec-heading" className="text-base font-semibold text-gray-900">
             Recommended for You
           </h2>
           <p className="mt-0.5 text-xs text-gray-500">
-            Personalised suggestions based on your goals
+            Personalised suggestions based on your goals and recent food history
           </p>
         </div>
         <button
+          type="button"
           onClick={() => {
             setDismissed(new Set());
             invalidateRecommendations();
@@ -208,23 +211,19 @@ export default function RecipeRecommendations({
         </button>
       </div>
 
-      {/* Loading state */}
       {isLoading && (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: limit }).map((_, i) => (
-            <div
-              key={i}
-              className="h-40 animate-pulse rounded-xl bg-gray-100"
-            />
+            <div key={i} className="h-40 animate-pulse rounded-xl bg-gray-100" />
           ))}
         </div>
       )}
 
-      {/* Error state */}
       {isError && (
         <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-          Could not load recommendations.{" "}
+          Could not load recommendations.{' '}
           <button
+            type="button"
             onClick={() => refetch()}
             className="font-medium underline hover:no-underline"
           >
@@ -233,11 +232,11 @@ export default function RecipeRecommendations({
         </div>
       )}
 
-      {/* Empty state (after dismissals or no data) */}
       {!isLoading && !isError && visible.length === 0 && (
         <div className="rounded-xl border border-dashed border-gray-300 p-8 text-center text-sm text-gray-500">
-          No recommendations right now.{" "}
+          No recommendations right now.{' '}
           <button
+            type="button"
             onClick={() => {
               setDismissed(new Set());
               refetch();
@@ -249,7 +248,6 @@ export default function RecipeRecommendations({
         </div>
       )}
 
-      {/* Cards */}
       {visible.length > 0 && (
         <>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -257,6 +255,7 @@ export default function RecipeRecommendations({
               <MealCard
                 key={rec.recommendation_id}
                 rec={rec}
+                busy={activeRecommendationId === rec.recommendation_id}
                 onLog={handleLog}
                 onDismiss={handleDismiss}
                 onSave={handleSave}
@@ -264,10 +263,9 @@ export default function RecipeRecommendations({
             ))}
           </div>
 
-          {/* Model attribution */}
-          {data?.model_version && data.model_version !== "fallback" && (
+          {data?.model_version && data.model_version !== 'fallback' && (
             <p className="mt-3 text-right text-xs text-gray-400">
-              Powered by SparkyFitness ML · model{" "}
+              Powered by SparkyFitness ML model{' '}
               <span className="font-mono">{data.model_version}</span>
             </p>
           )}

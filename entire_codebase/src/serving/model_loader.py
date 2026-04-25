@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 import os
-import tempfile
 from pathlib import Path
 
 import mlflow
@@ -47,30 +46,42 @@ class ModelLoader:
             logger.warning("Could not fetch production version from Registry: %s", exc)
         return None
 
-    def load_production_model(self) -> tuple[xgb.Booster, str, str]:
+    def get_latest_production_entry(self):
+        try:
+            client = self._get_client()
+            versions = client.get_latest_versions(self.model_name, stages=["Production"])
+            if versions:
+                return versions[0]
+        except Exception as exc:
+            logger.warning("Could not fetch production entry from Registry: %s", exc)
+        return None
+
+    def load_production_model(self) -> tuple[xgb.Booster, str, str, str | None]:
         """
         Load the Production model.
 
-        Returns (booster, version_str, source) where source is one of:
+        Returns (booster, version_str, source, embedding_artifact_dir) where source is one of:
           "mlflow_registry" | "local_fallback"
         """
-        version = self.get_latest_production_version()
-        if version is not None:
+        entry = self.get_latest_production_entry()
+        if entry is not None:
             try:
                 model_uri = f"models:/{self.model_name}/Production"
                 logger.info("Loading model from MLflow Registry: %s", model_uri)
                 booster = self._load_from_registry(model_uri)
-                logger.info("Loaded model version %s from MLflow Registry", version)
-                return booster, f"v{version}", "mlflow_registry"
+                artifact_dir = self._download_embedding_artifacts(entry.run_id)
+                logger.info("Loaded model version %s from MLflow Registry", entry.version)
+                return booster, f"v{entry.version}", "mlflow_registry", artifact_dir
             except Exception as exc:
                 logger.warning(
                     "Failed to load from MLflow Registry (v%s): %s. Falling back to local file.",
-                    version,
+                    entry.version,
                     exc,
                 )
 
         # Fallback to local file
-        return self._load_from_local(), "local", "local_fallback"
+        fallback_artifacts = self._local_embedding_artifact_dir()
+        return self._load_from_local(), "local", "local_fallback", fallback_artifacts
 
     def _load_from_registry(self, model_uri: str) -> xgb.Booster:
         """Load model via mlflow.xgboost — handles .xgb/.ubj/.json formats."""
@@ -87,6 +98,23 @@ class ModelLoader:
         booster = xgb.Booster()
         booster.load_model(self.fallback_path)
         return booster
+
+    def _download_embedding_artifacts(self, run_id: str | None) -> str | None:
+        if not run_id:
+            return None
+        try:
+            local_dir = mlflow.artifacts.download_artifacts(
+                artifact_uri=f"runs:/{run_id}/embedding_artifacts"
+            )
+            if Path(local_dir).exists():
+                return local_dir
+        except Exception as exc:
+            logger.warning("Could not download embedding artifacts for run %s: %s", run_id, exc)
+        return None
+
+    def _local_embedding_artifact_dir(self) -> str | None:
+        candidate = Path(self.fallback_path).resolve().parent / "embedding_artifacts"
+        return str(candidate) if candidate.exists() else None
 
     @staticmethod
     def _find_model_file(directory: Path) -> Path:

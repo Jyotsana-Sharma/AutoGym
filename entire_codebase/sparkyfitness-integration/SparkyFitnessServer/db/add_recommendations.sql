@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS recommendation_interactions (
     id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     recommendation_id UUID NOT NULL REFERENCES recommendation_cache (id) ON DELETE CASCADE,
     user_id           TEXT NOT NULL,
-    action            TEXT NOT NULL CHECK (action IN ('viewed','logged','dismissed','saved')),
+    action            TEXT NOT NULL CHECK (action IN ('viewed','logged','dismissed','saved','not_interested')),
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

@@ -5,6 +5,10 @@ export interface MealCandidate {
   meal_id: string;
   meal_name: string;
   description: string | null;
+  candidate_type: 'meal' | 'food';
+  food_id: string | null;
+  variant_id: string | null;
+  category_label: string | null;
   serving_size: number | null;
   serving_unit: string | null;
   calories: number | null;
@@ -23,6 +27,17 @@ export interface UserGoals {
   protein: number;
   carbs: number;
   fat: number;
+}
+
+export interface DiaryProfile {
+  sampleCount: number;
+  names: string[];
+  ingredientText: string;
+  avgCalories: number;
+  avgProtein: number;
+  avgCarbs: number;
+  avgFat: number;
+  mealTypeCounts: Record<string, number>;
 }
 
 export interface SavedRecommendation {
@@ -88,6 +103,64 @@ async function getRecentlyLoggedMealIds(userId: any, days: number): Promise<Set<
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function getRecentDiaryProfile(userId: any, days: number): Promise<DiaryProfile> {
+  const client = await getClient(userId);
+  try {
+    const result = await client.query(
+      `SELECT
+          COALESCE(fe.food_name, f.name, fem.name) AS name,
+          COALESCE(entry_mt.name, meal_mt.name) AS meal_type,
+          COALESCE(fe.calories, fv.calories * fe.quantity / NULLIF(fv.serving_size, 0)) AS calories,
+          COALESCE(fe.protein, fv.protein * fe.quantity / NULLIF(fv.serving_size, 0)) AS protein,
+          COALESCE(fe.carbs, fv.carbs * fe.quantity / NULLIF(fv.serving_size, 0)) AS carbs,
+          COALESCE(fe.fat, fv.fat * fe.quantity / NULLIF(fv.serving_size, 0)) AS fat
+         FROM food_entries fe
+         LEFT JOIN foods f ON f.id = fe.food_id
+         LEFT JOIN food_variants fv ON fv.id = fe.variant_id
+         LEFT JOIN food_entry_meals fem ON fem.id = fe.food_entry_meal_id
+         LEFT JOIN meal_types entry_mt ON entry_mt.id = fe.meal_type_id
+         LEFT JOIN meal_types meal_mt ON meal_mt.id = fem.meal_type_id
+        WHERE fe.user_id = $1
+          AND fe.entry_date >= CURRENT_DATE - ($2 * interval '1 day')
+        ORDER BY fe.entry_date DESC, fe.created_at DESC
+        LIMIT 80`,
+      [userId, days]
+    );
+
+    const rows = result.rows;
+    const names = rows
+      .map((r: any) => String(r.name ?? '').trim())
+      .filter((name: string) => name.length > 0)
+      .slice(0, 40);
+    const avg = (field: string) => {
+      const values = rows
+        .map((r: any) => Number(r[field]))
+        .filter((value: number) => Number.isFinite(value) && value > 0);
+      if (values.length === 0) return 0;
+      return values.reduce((sum: number, value: number) => sum + value, 0) / values.length;
+    };
+    const mealTypeCounts: Record<string, number> = {};
+    for (const row of rows) {
+      const mealType = String(row.meal_type ?? '').toLowerCase().replace('snacks', 'snack');
+      if (mealType) mealTypeCounts[mealType] = (mealTypeCounts[mealType] ?? 0) + 1;
+    }
+
+    return {
+      sampleCount: rows.length,
+      names,
+      ingredientText: names.join(' '),
+      avgCalories: avg('calories'),
+      avgProtein: avg('protein'),
+      avgCarbs: avg('carbs'),
+      avgFat: avg('fat'),
+      mealTypeCounts,
+    };
+  } finally {
+    client.release();
+  }
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function getCandidateMeals(userId: any, excludeMealIds: Set<string>, limit: number): Promise<MealCandidate[]> {
   const client = await getClient(userId);
   try {
@@ -102,6 +175,10 @@ async function getCandidateMeals(userId: any, excludeMealIds: Set<string>, limit
            m.id                                                                 AS meal_id,
            m.name                                                               AS meal_name,
            m.description,
+           'meal'                                                              AS candidate_type,
+           NULL::uuid                                                          AS food_id,
+           NULL::uuid                                                          AS variant_id,
+           NULL::text                                                          AS category_label,
            m.serving_size,
            m.serving_unit,
            COUNT(mf.id)                                                         AS n_ingredients,
@@ -130,6 +207,10 @@ async function getCandidateMeals(userId: any, excludeMealIds: Set<string>, limit
         meal_id: r.meal_id,
         meal_name: r.meal_name,
         description: r.description ?? null,
+        candidate_type: r.candidate_type ?? 'meal',
+        food_id: r.food_id ?? null,
+        variant_id: r.variant_id ?? null,
+        category_label: r.category_label ?? null,
         serving_size: r.serving_size ? Number(r.serving_size) : null,
         serving_unit: r.serving_unit ?? null,
         n_ingredients: Number(r.n_ingredients),
@@ -149,6 +230,10 @@ async function getCandidateMeals(userId: any, excludeMealIds: Set<string>, limit
            f.id             AS meal_id,
            f.name           AS meal_name,
            f.brand          AS description,
+           'food'           AS candidate_type,
+           f.id             AS food_id,
+           fv.id            AS variant_id,
+           NULL::text       AS category_label,
            fv.serving_size,
            fv.serving_unit,
            1                AS n_ingredients,
@@ -173,6 +258,10 @@ async function getCandidateMeals(userId: any, excludeMealIds: Set<string>, limit
       meal_id: r.meal_id,
       meal_name: r.meal_name,
       description: r.description ?? null,
+      candidate_type: r.candidate_type ?? 'food',
+      food_id: r.food_id ?? null,
+      variant_id: r.variant_id ?? null,
+      category_label: r.category_label ?? null,
       serving_size: r.serving_size ? Number(r.serving_size) : null,
       serving_unit: r.serving_unit ?? null,
       n_ingredients: Number(r.n_ingredients),
@@ -296,6 +385,7 @@ async function logInteraction(userId: any, recommendationId: string, action: str
 export default {
   getUserGoals,
   getRecentlyLoggedMealIds,
+  getRecentDiaryProfile,
   getCandidateMeals,
   saveRecommendations,
   getRecommendationForFeedback,

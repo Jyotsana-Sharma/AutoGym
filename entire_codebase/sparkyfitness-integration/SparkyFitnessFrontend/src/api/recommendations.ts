@@ -17,7 +17,13 @@ export interface RecommendedMeal {
   fat_g: number | null;
   serving_size: number | null;
   serving_unit: string | null;
+  candidate_type: 'meal' | 'food';
+  food_id: string | null;
+  variant_id: string | null;
+  strategy: 'cold_start' | 'personalized';
+  category_label: string;
   reason: string;
+  explanation: string[];
 }
 
 export interface RecommendationsResponse {

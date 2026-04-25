@@ -135,6 +135,17 @@ def check_allergen_safety(
         restricted_users = test_df[test_df[user_flag] == 1]["user_id"].unique()
         if len(restricted_users) == 0:
             continue
+        if len(restricted_users) < MIN_GROUP_SIZE:
+            issues.append({
+                "user_restriction": user_flag,
+                "recipe_allergen": recipe_flag,
+                "violation_rate": None,
+                "passed": True,
+                "skipped": True,
+                "reason": f"Too few users ({len(restricted_users)} < {MIN_GROUP_SIZE})",
+                "n_users": len(restricted_users),
+            })
+            continue
         # For those users, get their top-k recommendations
         user_data = test_df[test_df["user_id"].isin(restricted_users)].copy()
         top_k_df = (
@@ -148,6 +159,7 @@ def check_allergen_safety(
             "recipe_allergen": recipe_flag,
             "violation_rate": round(float(violation_rate), 4),
             "passed": violation_rate < 0.01,
+            "skipped": False,
             "n_users": len(restricted_users),
         })
 

@@ -148,7 +148,11 @@ services:
              cp /output/train.csv /training-data/train.csv &&
              cp /output/val.csv /training-data/val.csv &&
              cp /output/test.csv /training-data/test.csv &&
-             cp /output/manifest.json /training-data/manifest.json"
+             cp /output/manifest.json /training-data/manifest.json &&
+             if [ -d /output/embedding_artifacts ]; then
+               rm -rf /training-data/embedding_artifacts;
+               cp -R /output/embedding_artifacts /training-data/embedding_artifacts;
+             fi"
 
   drift-monitor:
     build:
@@ -422,12 +426,39 @@ services:
     environment:
       PGPASSWORD: ${SPARKY_FITNESS_DB_PASSWORD:-sparky_fit_pass}
     volumes:
-      - ./sparkyfitness-integration/SparkyFitnessServer/db/add_recommendations.sql:/migration.sql:ro
+      - ./sparkyfitness-integration/SparkyFitnessServer/db:/migrations:ro
     entrypoint: []
     command:
       - /bin/sh
       - -c
-      - "sleep 10 && psql -h sparkyfitness-db -U ${SPARKY_FITNESS_DB_USER:-sparky} -d ${SPARKY_FITNESS_DB_NAME:-sparkyfitness_db} -f /migration.sql && echo 'Recommendation migration applied.'"
+      - "sleep 10 && psql -h sparkyfitness-db -U ${SPARKY_FITNESS_DB_USER:-sparky} -d ${SPARKY_FITNESS_DB_NAME:-sparkyfitness_db} -f /migrations/add_food_category.sql && psql -h sparkyfitness-db -U ${SPARKY_FITNESS_DB_USER:-sparky} -d ${SPARKY_FITNESS_DB_NAME:-sparkyfitness_db} -f /migrations/add_recommendations.sql && echo 'Recommendation migrations applied.'"
+
+  foodcom-import:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: data
+    container_name: sparky-foodcom-import
+    networks: [sparky-net, sparkyfitness-network]
+    profiles: ["pipeline"]
+    depends_on:
+      batch-pipeline:
+        condition: service_completed_successfully
+      sparkyfitness-migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ./data:/data:ro
+      - ./output:/output:ro
+    environment:
+      SPARKY_FITNESS_DB_URL: postgresql://${SPARKY_FITNESS_DB_USER:-sparky}:${SPARKY_FITNESS_DB_PASSWORD:-sparky_fit_pass}@sparkyfitness-db:5432/${SPARKY_FITNESS_DB_NAME:-sparkyfitness_db}
+      FOODCOM_IMPORT_MAX_RECIPES: ${FOODCOM_IMPORT_MAX_RECIPES:-}
+    command:
+      - python
+      - scripts/import_foodcom_to_sparkyfitness.py
+      - --enriched-csv
+      - /output/enriched_recipes.csv
+      - --raw-csv
+      - /data/RAW_recipes.csv
 
   sparkyfitness-frontend:
     build:

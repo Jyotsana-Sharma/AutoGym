@@ -37,6 +37,7 @@ NON_FEATURE_COLUMNS = {
     "date",
     "name",
     "submitted",
+    "rating",
 }
 
 
@@ -80,12 +81,12 @@ def parse_args() -> argparse.Namespace:
 
 def simulate_action(rating: float) -> dict[str, Any]:
     if rating >= 4:
-        return {"action": "cook", "rating": random.choice([4, 5])}
+        return {"action": random.choice(["logged", "saved"]), "rating": random.choice([4, 5])}
     if rating >= 3:
-        return {"action": random.choice(["cook", "view", "view"]), "rating": random.choice([3, 4])}
+        return {"action": random.choice(["viewed", "saved"]), "rating": random.choice([3, 4])}
     if rating >= 2:
-        return {"action": random.choice(["view", "skip", "skip"]), "rating": random.choice([2, 3])}
-    return {"action": "skip", "rating": random.choice([1, 2])}
+        return {"action": random.choice(["viewed", "dismissed", "dismissed"]), "rating": random.choice([2, 3])}
+    return {"action": "dismissed", "rating": random.choice([1, 2])}
 
 
 def normalize_rows(df: pd.DataFrame) -> pd.DataFrame:
@@ -184,6 +185,7 @@ def call_predict(api_url: str, request_id: str, instances: list[dict[str, Any]])
 def call_feedback(
     api_url: str,
     request_id: str,
+    recommendation_id: str,
     user_id: int,
     recipe_id: int,
     action: str,
@@ -195,6 +197,7 @@ def call_feedback(
         f"{api_url.rstrip('/')}/feedback",
         json={
             "request_id": request_id,
+            "recommendation_id": recommendation_id,
             "user_id": user_id,
             "recipe_id": recipe_id,
             "action": action,
@@ -294,6 +297,9 @@ def main() -> None:
                 global_pool=candidate_pool,
                 candidate_pool_size=args.candidate_pool_size,
             )
+            for inst in instances:
+                inst["recommendation_id"] = f"{request_id}-{int(inst['recipe_id'])}"
+            recommendation_id = f"{request_id}-{recipe_id}"
 
             top_recipe_id = None
             top_score = None
@@ -312,6 +318,7 @@ def main() -> None:
                     call_feedback(
                         args.api_url,
                         request_id=request_id,
+                        recommendation_id=recommendation_id,
                         user_id=user_id,
                         recipe_id=recipe_id,
                         action=action_payload["action"],
@@ -354,7 +361,11 @@ def main() -> None:
     print(f"Successful:       {metrics['ok']:,}")
     print(f"Failed:           {metrics['fail']:,}")
     print(f"Average latency:  {avg_latency:.1f} ms")
-    print(f"Actions:          cook={metrics['action_cook']} view={metrics['action_view']} skip={metrics['action_skip']}")
+    print(
+        "Actions:          "
+        f"logged={metrics['action_logged']} saved={metrics['action_saved']} "
+        f"viewed={metrics['action_viewed']} dismissed={metrics['action_dismissed']}"
+    )
     print(f"Audit log:        {args.log_file}")
     print("=" * 60)
 

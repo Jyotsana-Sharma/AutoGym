@@ -22,12 +22,29 @@ Outputs : enriched_recipes.csv
 """
 
 import ast
+import json
+import sys
 import warnings
 from collections import Counter
+from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+import joblib
 import numpy as np
 import pandas as pd
-from sklearn.decomposition import PCA
+from sklearn.decomposition import PCA, TruncatedSVD
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.pipeline import Pipeline
+
+from src.serving.feature_contract import EMBEDDING_COMPONENTS
+from src.serving.embedding_utils import (
+    embedding_columns,
+    normalize_text,
+    pad_embedding_matrix,
+)
 
 warnings.filterwarnings("ignore")
 
@@ -41,9 +58,12 @@ ENRICHED_RECIPES_PATH = "enriched_recipes.csv"
 TRAINING_TABLE_PATH   = "training_table.csv"
 
 POSITIVE_RATING_THRESHOLD = 4   # ratings >= this → label 1
+NEGATIVES_PER_POSITIVE   = 2   # sampled unobserved recipes per positive
 MIN_USER_INTERACTIONS     = 5   # drop users with fewer interactions
 HISTORY_PCA_COMPONENTS    = 6   # PCA dims for cooking history embedding
+HISTORY_LOOKBACK_RECIPES  = 10  # recent positive interactions used for history
 MINUTES_QUANTILE_UPPER    = 0.99
+EMBEDDING_ARTIFACT_DIR    = "embedding_artifacts"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -140,6 +160,7 @@ def parse_nutrition(x):
         return [np.nan] * 7
     return list(vals)
 
+
 def extract_cuisine(tags_raw):
     """Map tags → cuisine using ETHNICITY_MAP (first match wins)."""
     tags = parse_tags(tags_raw)
@@ -160,6 +181,156 @@ def detect_allergens(ingredients_raw):
                 found.add(allergen)
                 break
     return list(found)
+
+
+def build_ingredient_document(ingredients_raw):
+    ingredients = parse_ingredients(ingredients_raw)
+    return " ".join(filter(None, (normalize_text(ing) for ing in ingredients)))
+
+
+def build_text_document(name, description):
+    return " ".join(
+        filter(None, [normalize_text(name), normalize_text(description)])
+    ).strip()
+
+
+def fit_embedding_pipeline(documents, *, max_features):
+    docs = pd.Series(documents).fillna("").astype(str)
+    try:
+        vectorizer = TfidfVectorizer(
+            ngram_range=(1, 2),
+            min_df=2,
+            max_features=max_features,
+        )
+        tfidf = vectorizer.fit_transform(docs)
+    except ValueError:
+        return None, np.zeros((len(docs), EMBEDDING_COMPONENTS), dtype=float)
+
+    max_rank = min(EMBEDDING_COMPONENTS, tfidf.shape[0] - 1, tfidf.shape[1] - 1)
+    if max_rank < 1:
+        return None, np.zeros((len(docs), EMBEDDING_COMPONENTS), dtype=float)
+
+    pipeline = Pipeline(
+        [
+            ("vectorizer", vectorizer),
+            ("svd", TruncatedSVD(n_components=max_rank, random_state=42)),
+        ]
+    )
+    matrix = pipeline.fit_transform(docs)
+    return pipeline, pad_embedding_matrix(matrix)
+
+
+def embedding_dim(pipeline):
+    return 0 if pipeline is None else pipeline.named_steps["svd"].n_components
+
+
+def save_embedding_artifacts(ingredient_pipeline, text_pipeline):
+    artifact_dir = Path(EMBEDDING_ARTIFACT_DIR)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    # sklearn Pipeline + joblib persists the exact TF-IDF/SVD transform for serving.
+    joblib.dump(ingredient_pipeline, artifact_dir / "ingredient_pipeline.pkl")
+    joblib.dump(text_pipeline, artifact_dir / "text_pipeline.pkl")
+    metadata = {
+        "ingredient_dim": embedding_dim(ingredient_pipeline),
+        "text_dim": embedding_dim(text_pipeline),
+        "target_dim": EMBEDDING_COMPONENTS,
+    }
+    (artifact_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
+
+
+def add_recipe_embedding_features(recipes):
+    recipes = recipes.copy()
+    ingredient_docs = recipes["ingredients"].apply(build_ingredient_document)
+    text_docs = recipes.apply(
+        lambda row: build_text_document(row.get("name"), row.get("description")),
+        axis=1,
+    )
+
+    ingredient_pipeline, ingredient_matrix = fit_embedding_pipeline(
+        ingredient_docs, max_features=5000
+    )
+    text_pipeline, text_matrix = fit_embedding_pipeline(
+        text_docs, max_features=10000
+    )
+
+    for idx in range(EMBEDDING_COMPONENTS):
+        recipes[f"ingredient_emb_{idx+1}"] = ingredient_matrix[:, idx]
+        recipes[f"text_emb_{idx+1}"] = text_matrix[:, idx]
+
+    save_embedding_artifacts(ingredient_pipeline, text_pipeline)
+    print(
+        "  Added recipe embedding features:"
+        f" ingredient_dim={embedding_dim(ingredient_pipeline)}"
+        f" text_dim={embedding_dim(text_pipeline)}"
+    )
+    return recipes
+
+
+def add_history_vector_columns(cooked, user_features, recipe_prefix, history_prefix):
+    recipe_cols = [col for col in embedding_columns(recipe_prefix) if col in cooked.columns]
+    if not recipe_cols:
+        for col in embedding_columns(history_prefix):
+            user_features[col] = 0.0
+        return user_features
+
+    history_vectors = cooked[["user_id", *recipe_cols]].groupby("user_id", as_index=False).mean()
+    history_vectors = history_vectors.rename(
+        columns={
+            recipe_col: recipe_col.replace(recipe_prefix, history_prefix, 1)
+            for recipe_col in recipe_cols
+        }
+    )
+    user_features = user_features.merge(history_vectors, on="user_id", how="left")
+    for col in embedding_columns(history_prefix):
+        if col not in user_features.columns:
+            user_features[col] = 0.0
+        else:
+            user_features[col] = (
+                pd.to_numeric(user_features[col], errors="coerce")
+                .fillna(0.0)
+                .astype(float)
+            )
+    return user_features
+
+
+def rowwise_cosine(frame, left_cols, right_cols):
+    left = frame[left_cols].fillna(0.0).to_numpy(dtype=float)
+    right = frame[right_cols].fillna(0.0).to_numpy(dtype=float)
+    numerators = np.sum(left * right, axis=1)
+    denominators = np.linalg.norm(left, axis=1) * np.linalg.norm(right, axis=1)
+    return np.divide(numerators, denominators, out=np.zeros(len(frame), dtype=float), where=denominators > 0)
+
+
+def add_similarity_features(training):
+    training = training.copy()
+
+    ingredient_cols = embedding_columns("ingredient_emb")
+    history_ingredient_cols = embedding_columns("history_ingredient_emb")
+    text_cols = embedding_columns("text_emb")
+    history_text_cols = embedding_columns("history_text_emb")
+
+    for col in ingredient_cols + history_ingredient_cols + text_cols + history_text_cols:
+        if col not in training.columns:
+            training[col] = 0.0
+
+    training["ingredient_embedding_cosine"] = rowwise_cosine(
+        training, ingredient_cols, history_ingredient_cols
+    )
+    training["text_embedding_cosine"] = rowwise_cosine(
+        training, text_cols, history_text_cols
+    )
+    macro_left = ["calories", "protein_g", "carbohydrate_g", "total_fat_g"]
+    macro_right = [
+        "daily_calorie_target",
+        "protein_target_g",
+        "carbs_target_g",
+        "fat_target_g",
+    ]
+    for col in macro_left + macro_right:
+        if col not in training.columns:
+            training[col] = 0.0
+    training["history_macro_similarity"] = rowwise_cosine(training, macro_left, macro_right)
+    return training
 
 
 def enrich_recipes(df_recipes, df_interact):
@@ -237,14 +408,39 @@ def enrich_recipes(df_recipes, df_interact):
 # ─────────────────────────────────────────────────────────────
 
 def build_labels(df_interact):
-    """rating >= POSITIVE_RATING_THRESHOLD → label 1, else 0."""
+    """Keep only positive Food.com ratings; negatives are sampled separately."""
     print("\n── STEP 2: Building labels ────────────────────────────")
-    df = df_interact.copy()
-    df["label"] = (df["rating"] >= POSITIVE_RATING_THRESHOLD).astype(int)
-    pos = df["label"].sum()
-    neg = len(df) - pos
-    print(f"  Positive (label=1): {pos:,}  |  Negative (label=0): {neg:,}")
+    df = df_interact[df_interact["rating"] >= POSITIVE_RATING_THRESHOLD].copy()
+    df["label"] = 1
+    df["data_source"] = "offline"
+    print(f"  Positive ratings kept: {len(df):,}")
     return df
+
+
+def sample_negative_interactions(all_interactions, positives, valid_recipe_ids, active_users):
+    rows = []
+    valid_ids = set(valid_recipe_ids)
+    observed = all_interactions.groupby("user_id")["recipe_id"].apply(set).to_dict()
+    for user_id, group in positives[positives["user_id"].isin(active_users)].groupby("user_id"):
+        pool = list(valid_ids - observed.get(user_id, set()))
+        n = min(len(pool), len(group) * NEGATIVES_PER_POSITIVE)
+        if n <= 0:
+            continue
+        sampled = pd.Series(pool).sample(n=n, random_state=42).tolist()
+        last_date = group["date"].max() if "date" in group.columns else None
+        rows.extend(
+            {
+                "user_id": user_id,
+                "recipe_id": recipe_id,
+                "date": last_date,
+                "rating": None,
+                "label": 0,
+                "data_source": "offline_sampled_negative",
+            }
+            for recipe_id in sampled
+        )
+    print(f"  Sampled negatives: {len(rows):,}")
+    return pd.DataFrame(rows)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -263,11 +459,25 @@ def derive_user_features(interactions, recipes):
                    ["recipe_id", "calories", "protein_g", "carbohydrate_g",
                     "total_fat_g", "cuisine", "tags"]
                    if c in recipes.columns]
+    recipe_cols.extend(
+        [
+            c for c in recipes.columns
+            if c.startswith("ingredient_emb_") or c.startswith("text_emb_")
+        ]
+    )
 
     history = interactions.merge(
         recipes[recipe_cols], on="recipe_id", how="left"
     )
     cooked = history[history["label"] == 1]
+    if "date" in cooked.columns:
+        cooked = cooked.copy()
+        cooked["date"] = pd.to_datetime(cooked["date"], errors="coerce")
+        cooked = (
+            cooked.sort_values("date")
+            .groupby("user_id", group_keys=False)
+            .tail(HISTORY_LOOKBACK_RECIPES)
+        )
 
     # ── Macro targets: average of what the user cooks ─────────────────────
     agg_kwargs = {}
@@ -305,6 +515,8 @@ def derive_user_features(interactions, recipes):
 
     # ── Cooking history embeddings via PCA on cuisine one-hots ────────────
     agg = add_history_embeddings(cooked, agg)
+    agg = add_history_vector_columns(cooked, agg, "ingredient_emb", "history_ingredient_emb")
+    agg = add_history_vector_columns(cooked, agg, "text_emb", "history_text_emb")
 
     # ── Drop users with too few interactions ──────────────────────────────
     user_counts = interactions.groupby("user_id").size()
@@ -343,6 +555,12 @@ def add_history_embeddings(cooked, user_features):
     pca_df["user_id"] = user_cuisine["user_id"].values
 
     user_features = user_features.merge(pca_df, on="user_id", how="left")
+    for idx in range(1, HISTORY_PCA_COMPONENTS + 1):
+        col = f"history_pc{idx}"
+        if col not in user_features.columns:
+            user_features[col] = 0.0
+        else:
+            user_features[col] = pd.to_numeric(user_features[col], errors="coerce").fillna(0.0)
     print(f"  Added {n_components} history PCA components")
     return user_features
 
@@ -354,7 +572,7 @@ def add_history_embeddings(cooked, user_features):
 def assemble_training_table(interactions, recipes, user_features):
     """
     Final join:
-      interactions  (user_id, recipe_id, date, rating, label)
+      interactions  (user_id, recipe_id, date, rating, label, data_source)
         ↕ recipe features  (macros, cuisine, allergen flags, …)
         ↕ user features    (targets, diet flags, history PCA)
     → one row per (user, recipe) with full X + y.
@@ -375,10 +593,11 @@ def assemble_training_table(interactions, recipes, user_features):
                            if c not in drop_recipe_cols]
 
     training = (
-        interactions[["user_id", "recipe_id", "date", "rating", "label"]]
+        interactions[["user_id", "recipe_id", "date", "rating", "label", "data_source"]]
         .merge(recipes[recipe_feature_cols], on="recipe_id", how="inner")
         .merge(user_features,                on="user_id",    how="inner")
     )
+    training = add_similarity_features(training)
 
     print(f"  Shape         : {training.shape}")
     print(f"  Users         : {training['user_id'].nunique():,}")
@@ -439,6 +658,7 @@ def main():
 
     # Step 1: Enrich recipes (notebook logic)
     enriched = enrich_recipes(df_recipes, df_interact)
+    enriched = add_recipe_embedding_features(enriched)
     enriched.to_csv(ENRICHED_RECIPES_PATH, index=False)
     print(f"\n  Saved → {ENRICHED_RECIPES_PATH}  ({len(enriched):,} rows)")
 
@@ -452,6 +672,10 @@ def main():
 
     # Step 3: Derive user features
     user_features = derive_user_features(interactions, enriched)
+    negatives = sample_negative_interactions(
+        df_interact, interactions, valid_ids, set(user_features["user_id"])
+    )
+    interactions = pd.concat([interactions, negatives], ignore_index=True)
 
     # Step 4: Assemble full training table
     training = assemble_training_table(interactions, enriched, user_features)

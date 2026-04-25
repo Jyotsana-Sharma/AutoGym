@@ -172,10 +172,11 @@ def run_retraining(
         if refresh.returncode == 0:
             logger.info("Training data refreshed from database")
         else:
-            logger.warning(
-                "Batch pipeline refresh failed (using existing data):\n%s",
-                refresh.stdout[-2000:] + refresh.stderr[-2000:],
-            )
+            details = refresh.stdout[-2000:] + refresh.stderr[-2000:]
+            logger.error("Batch pipeline refresh failed; aborting retrain:\n%s", details)
+            result["failure_reason"] = "Batch pipeline refresh failed"
+            result["duration_seconds"] = round(time.perf_counter() - start, 2)
+            return result
     else:
         logger.info("Step 0/5: DATABASE_URL not set — using existing training CSVs")
 
@@ -224,8 +225,13 @@ def run_retraining(
     logger.info("Step 3/6: Running training...")
     try:
         mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:5000"))
+        training_started = time.perf_counter()
         summary = run_training(patched_cfg)
+        training_wall_time = time.perf_counter() - training_started
         metrics = summary.get("metrics", {})
+        metrics["train_time_seconds"] = round(
+            float(metrics.get("wall_time_seconds", training_wall_time)), 4
+        )
         result["metrics"] = metrics
         logger.info("Training complete. Metrics: %s", metrics)
         baseline_ndcg = result.get("baseline_metrics", {}).get("ndcg_at_10", None)
@@ -253,6 +259,11 @@ def run_retraining(
     last_run = mlflow.last_active_run()
     run_id = last_run.info.run_id if last_run else None
     result["run_id"] = run_id
+    if run_id:
+        retrain_metrics = {}
+        ndcg_at_10 = metrics.get("ndcg_at_10")
+        if ndcg_at_10 is not None:
+            retrain_metrics["ndcg_at_10"] = float(ndcg_at_10)
 
     # Step 3.5/6: Safeguarding — fairness check + global explainability
     fairness_passed = True
