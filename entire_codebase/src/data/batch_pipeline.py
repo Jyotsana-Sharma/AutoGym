@@ -34,6 +34,11 @@ ACTION_PRIORITY = {"logged": 3, "saved": 3, "dismissed": 2, "viewed": 1}
 POSITIVE_RATING_THRESHOLD = 4.0
 NEGATIVE_RATING_THRESHOLD = 2.0
 
+# Quality gate: only keep feedback from the last N days (stale labels distort new model)
+FEEDBACK_FRESHNESS_DAYS = int(os.environ.get("FEEDBACK_FRESHNESS_DAYS", "14"))
+# Quality gate: exclude feedback logged within this many seconds of a drift event
+DRIFT_EXCLUSION_WINDOW_SEC = int(os.environ.get("DRIFT_EXCLUSION_WINDOW_SEC", "3600"))
+
 def sha256_file(p):
     h=hashlib.sha256()
     with open(p,"rb") as f:
@@ -153,9 +158,26 @@ def choose_online_training_records(records):
     return [(label, record) for _, label, record in chosen.values()]
 
 
+def filter_uniform_feedback_users(chosen):
+    """Drop users whose entire feedback history is a single label (all saved or all dismissed).
+    These are likely disengaged users or bots — their labels add no signal and can dominate
+    a small online batch.  Users with only one feedback record are kept (can't detect variance).
+    """
+    from collections import defaultdict
+    user_labels = defaultdict(set)
+    for label, record in chosen:
+        user_labels[str(record.get("inf_user_id", ""))].add(label)
+    valid_users = {uid for uid, label_set in user_labels.items() if len(label_set) != 1 or len(user_labels) == 1}
+    kept = [(label, r) for label, r in chosen if str(r.get("inf_user_id", "")) in valid_users]
+    dropped = len(chosen) - len(kept)
+    if dropped:
+        print(f"  Quality filter: dropped {dropped} rows from {len(user_labels) - len(valid_users)} uniform-feedback user(s)")
+    return kept
+
+
 def build_online_training_rows(records, upsample_factor=ONLINE_UPSAMPLE_FACTOR):
     rows = []
-    for label, record in choose_online_training_records(records):
+    for label, record in filter_uniform_feedback_users(choose_online_training_records(records)):
         inf_user_id = int(record["inf_user_id"])
         inf_recipe_id = int(record["inf_recipe_id"])
         fb_user_id = int(record["fb_user_id"])
@@ -197,31 +219,50 @@ def export_online_training_rows(db_url, out_path):
     try:
         conn = psycopg2.connect(db_url)
         with conn.cursor() as cur:
+            # Fix: freshness gate — only use feedback from the last FEEDBACK_FRESHNESS_DAYS days.
+            # Stale labels (logged weeks after the prediction) describe a user preference that
+            # may no longer be current and distort the new model's targets.
+            #
+            # Fix: drift exclusion — skip feedback recorded within DRIFT_EXCLUSION_WINDOW_SEC
+            # of a detected drift event. During drift the production distribution differs from
+            # training, so labels from that window are less reliable.
             cur.execute(
                 """
                 SELECT
                     inf.request_id,
                     inf.recommendation_id,
-                    inf.user_id AS inf_user_id,
-                    inf.recipe_id AS inf_recipe_id,
+                    inf.user_id        AS inf_user_id,
+                    inf.recipe_id      AS inf_recipe_id,
                     inf.features::text AS features_json,
-                    fb.user_id AS fb_user_id,
-                    fb.recipe_id AS fb_recipe_id,
+                    fb.user_id         AS fb_user_id,
+                    fb.recipe_id       AS fb_recipe_id,
                     fb.rating,
                     fb.action,
                     COALESCE(fb.feedback_at, inf.captured_at) AS date
                 FROM inference_features inf
                 JOIN user_feedback fb
-                  ON inf.request_id = fb.request_id
+                  ON inf.request_id        = fb.request_id
                  AND inf.recommendation_id = fb.recommendation_id
-                WHERE fb.action IN ('logged', 'saved', 'dismissed', 'viewed')
-                   OR fb.rating IS NOT NULL
+                WHERE (fb.action IN ('logged', 'saved', 'dismissed', 'viewed')
+                       OR fb.rating IS NOT NULL)
+                  AND COALESCE(fb.feedback_at, inf.captured_at)
+                        >= NOW() - INTERVAL '1 day' * %s
+                  AND NOT EXISTS (
+                        SELECT 1 FROM drift_log dl
+                        WHERE dl.drift_detected = TRUE
+                          AND ABS(EXTRACT(EPOCH FROM (
+                                COALESCE(fb.feedback_at, inf.captured_at) - dl.run_at
+                              ))) < %s
+                      )
                 ORDER BY COALESCE(fb.feedback_at, inf.captured_at)
-                """
+                """,
+                (FEEDBACK_FRESHNESS_DAYS, DRIFT_EXCLUSION_WINDOW_SEC),
             )
             cols = [desc[0] for desc in cur.description]
             records = [dict(zip(cols, row)) for row in cur.fetchall()]
         conn.close()
+        print(f"  Freshness gate: last {FEEDBACK_FRESHNESS_DAYS} days | "
+              f"Drift exclusion window: {DRIFT_EXCLUSION_WINDOW_SEC}s")
         frame = build_online_training_rows(records)
         if len(frame):
             frame.to_csv(out_path, index=False)
