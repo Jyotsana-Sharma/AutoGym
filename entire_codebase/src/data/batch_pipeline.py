@@ -52,6 +52,7 @@ def get_swift_conn():
             "application_credential_id": os.environ.get("OS_APPLICATION_CREDENTIAL_ID", ""),
             "application_credential_secret": os.environ.get("OS_APPLICATION_CREDENTIAL_SECRET", ""),
             "region_name": os.environ.get("OS_REGION_NAME", "CHI@TACC"),
+            "project_domain_name": os.environ.get("OS_PROJECT_DOMAIN_NAME", "chameleon"),
         },
     )
 
