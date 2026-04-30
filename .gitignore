@@ -7,11 +7,11 @@ app-cred-*.sh
 sparky-data-pipeline/.CHI-251409-openrc.sh
 .CHI-251409-openrc.sh
 .env 
-.COURSE_CONCEPT_ALIGNMENT.md
-.CHAMELEON_DEPLOYMENT.md
-.MILESTONE_DELIVERABLES.md
-.PROJECT_PROPOSAL.md
-.project_reproducibility.md
+COURSE_CONCEPT_ALIGNMENT.md
+CHAMELEON_DEPLOYMENT.md
+MILESTONE_DELIVERABLES.md
+PROJECT_PROPOSAL.md
+project_reproducibility.md
 
 # Local virtual environments
 .venv/
