@@ -6,7 +6,7 @@ app-cred-*.sh
 *openrc*.sh
 # Allow scripts/*.sh but block credential shell scripts (covered above)
 !scripts/*.sh
-
+.env
 # Python
 __pycache__/
 *.py[cod]
