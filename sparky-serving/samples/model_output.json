@@ -1,0 +1,20 @@
+{
+  "request_id": "req_rank_001",
+  "model_name": "xgb_ranker",
+  "model_version": "v1",
+  "generated_at": "2026-04-05T12:00:00Z",
+  "predictions": [
+    {
+      "user_id": 37449,
+      "recipe_id": 33096,
+      "score": 1.8421,
+      "rank": 1
+    },
+    {
+      "user_id": 37449,
+      "recipe_id": 120964,
+      "score": 0.9174,
+      "rank": 2
+    }
+  ]
+}
